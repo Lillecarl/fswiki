@@ -3,6 +3,7 @@
     fswiki status                 what you have pending
     fswiki diff                   what would change
     fswiki push -m "message"      publish all of it
+    fswiki revert                 throw a draft away
     fswiki push -m "..." a/b.md   publish a subset
 
 Push is all or nothing, the way `svn commit` is. If anything conflicts, nothing
@@ -49,6 +50,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          help="rewrite the drafts; without it, only report")
     p_merge.add_argument("--abort", action="store_true",
                          help="restore the drafts as they were before merging")
+
+    p_revert = sub.add_parser(
+        "revert",
+        help="withdraw drafts, putting the files back to what is published")
+    p_revert.add_argument("paths", nargs="*", help="limit to these paths")
+    p_revert.add_argument("--apply", action="store_true",
+                          help="actually withdraw them; without it, only report")
 
     p_push = sub.add_parser("push", help="publish drafts")
     p_push.add_argument("paths", nargs="*",
@@ -100,6 +108,9 @@ async def run(args: argparse.Namespace) -> int:
             if args.abort:
                 return await _abort_merge(client, selected)
             return await _merge(client, principal, selected, apply=args.apply)
+
+        if args.command == "revert":
+            return await _revert(client, selected, apply=args.apply)
 
         if not selected:
             print("Nothing to push.")
@@ -236,6 +247,46 @@ async def _abort_merge(client: Client, drafts: list[dict]) -> int:
 
     print("\n" + report.dim("Your drafts are as they were before the merge. "
                             "Published history was never involved."))
+    return 0
+
+
+async def _revert(client: Client, drafts: list[dict], *, apply: bool) -> int:
+    """Withdraw drafts. The file goes back to whatever is published.
+
+    A dry run unless --apply, on the same reasoning as merge: this rewrites
+    work that has not been published. It is in fact the stronger case of the
+    two. `merge --abort` restores from `pre_merge_content`, a copy the server
+    kept on purpose; revert deletes the draft row and with it the only copy of
+    the text that ever existed. There is no undo, so the default is to say what
+    would happen.
+
+    The published side is fetched even for the dry run, because the useful
+    number is how much would change, not how big the draft is.
+    """
+    if not drafts:
+        print("Nothing pending.")
+        return 0
+
+    entries = [(d, await _published_text(client, d)) for d in drafts]
+
+    if not apply:
+        print(report.render_revert(entries, applied=False))
+        return 0
+
+    for draft, _ in entries:
+        display = paths.to_display(draft["path"])
+        try:
+            # False, not an exception, when the draft is someone else's: RLS
+            # filters the delete rather than refusing it. Silence would read as
+            # success and leave the file looking reverted when it is not.
+            if not await client.delete_draft(draft["path"]):
+                print(f"fswiki: no draft of yours at {display}", file=sys.stderr)
+                return 1
+        except PostgrestError as exc:
+            print(f"fswiki: could not withdraw {display}: {exc}", file=sys.stderr)
+            return 1
+
+    print(report.render_revert(entries, applied=True))
     return 0
 
 

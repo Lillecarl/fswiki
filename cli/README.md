@@ -12,6 +12,8 @@ into published revisions.
     fswiki push -m "fix the guide"   # publish all of it
     fswiki push -m "..." a/b.md      # publish a subset
     fswiki push -n -m "..."          # dry run
+    fswiki revert                    # what withdrawing your drafts would cost
+    fswiki revert --apply a/b.md     # withdraw one
 
 It depends on `fswiki-core`, not on the FUSE client, so publishing from a server
 or a CI job does not require the ability to mount anything.
@@ -128,19 +130,45 @@ reconciled with.
 
 Published history is never involved in any of this.
 
+## Throwing an edit away
+
+`fswiki revert` withdraws drafts: the file goes back to whatever is published,
+and for a draft that creates something the file simply stops existing.
+
+    $ fswiki revert
+    2 changes would be withdrawn:
+
+       modified  engineering/onboarding
+                 2 changed lines against revision 90
+            new  public/brand-new
+                 3 lines, published nowhere else
+
+    This discards unpublished work. Nothing keeps a copy of it.
+    Withdraw them for real with: fswiki revert --apply
+
+A dry run unless `--apply`, for a stronger reason than `merge` has. `merge
+--abort` restores from `pre_merge_content`, a copy the server keeps on purpose.
+Revert deletes the draft row, and with it the only copy of that text that ever
+existed. There is no undo, so the default is to say what would happen.
+
+The cost is counted against the published text rather than reported as the
+draft's size, because the draft's size is not the loss: a 300-line page with
+one corrected typo loses one line, and "300 lines" would frighten someone out
+of a safe operation. A `delete` or `move` draft discards no text at all, and
+says so instead of quoting a number.
+
+A draft in the middle of a merge is flagged, because `merge --abort` will put
+that one back and revert will not.
+
 ## Known gaps
 
 - `diff` fetches the published body of every selected draft, one request each.
   Fine for a handful, wasteful for a hundred. `merge` is worse: three reads per
-  conflicting draft.
+  conflicting draft, and `revert` pays it too so its dry run can be accurate.
 - `merge` cannot help a create/create collision — there is no common ancestor,
   so the answer is a different name — and it says so rather than guessing.
 - `merge --abort` backs out the text, not a `delete`d or `move`d draft's other
   fields. Those operations carry no content to merge, so nothing rewrites them.
-- Still no `revert` for an ordinary draft. Withdrawing one means deleting the
-  file through the mount, or `DELETE /draft?path=eq.<ltree>`.
 - No `acl` verbs. `wiki.explain_acl()` is the intended backend and returns the
   ACL in the order it is consulted, including the two rules that skip it — a
   superuser, and an owner's standing `grant`.
-- No `acl` verbs. `wiki.explain_acl()` is the intended backend and already
-  returns the ACL in the order it is consulted.

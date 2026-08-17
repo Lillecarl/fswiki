@@ -269,3 +269,72 @@ def render_push(results: list[dict], drafts: list[dict] | None = None) -> tuple[
         dim("for a conflict, re-read the file to get the server's version."),
     ]
     return ("\n".join([header, "", *lines, *footer]), False)
+
+
+def _lost(draft: dict, published: str | None) -> str:
+    """What withdrawing this draft actually costs, in the user's terms.
+
+    Counted against the published text rather than reported as the draft's
+    size, because the draft's size is not the loss — a 300-line page with one
+    corrected typo loses one line, and saying "300 lines" would frighten
+    someone out of a safe operation. For a create there is nothing on the
+    server to compare against, so the whole thing is the loss.
+    """
+    operation = draft["operation"]
+    if operation == "delete":
+        return "the retirement is cancelled; the page stays published"
+    if operation == "move":
+        return "the move is cancelled; the page stays where it is"
+
+    text = draft.get("content") or ""
+    if operation == "create" or published is None:
+        n = len(text.splitlines())
+        return f"{n} line{'s' if n != 1 else ''}, published nowhere else"
+
+    changed = sum(
+        1 for line in difflib.unified_diff(
+            published.splitlines(), text.splitlines(), n=0, lineterm="")
+        if line[:1] in "+-" and line[:3] not in ("+++", "---")
+    )
+    if not changed:
+        return "no change against the published text"
+    base = draft.get("base_version")
+    return (f"{changed} changed line{'s' if changed != 1 else ''} "
+            f"against revision {base}")
+
+
+def render_revert(entries: list[tuple[dict, str | None]], *, applied: bool) -> str:
+    """What withdrawing these drafts costs, or what withdrawing them cost."""
+    if not entries:
+        return "Nothing pending."
+
+    n = len(entries)
+    plural = "s" if n != 1 else ""
+    heading = (f"Withdrew {n} change{plural}:" if applied
+               else f"{n} change{plural} would be withdrawn:")
+    lines = [bold(heading), ""]
+
+    merging = False
+    for draft, published in sorted(entries, key=lambda e: e[0]["path"]):
+        label, paint = _OP_LABEL.get(draft["operation"], (draft["operation"], dim))
+        display = paths.to_display(draft["path"])
+        lines.append(f"  {paint(label.rjust(9))}  {display}")
+        lines.append(f"             {dim(_lost(draft, published))}")
+        if draft.get("pre_merge_content") is not None:
+            merging = True
+            lines.append(red("             a merge is outstanding here"))
+
+    lines.append("")
+    if applied:
+        lines.append(dim("Your working copy matches the server again. "
+                         "Published history was never involved."))
+        return "\n".join(lines)
+
+    # The one warning worth making loud. merge --abort restores text from a
+    # copy the server kept; this keeps no copy of anything.
+    lines.append(red("This discards unpublished work. Nothing keeps a copy of it."))
+    if merging:
+        lines.append(dim("A draft in the middle of a merge can be put back "
+                         "instead, with: fswiki merge --abort"))
+    lines.append(dim("Withdraw them for real with: fswiki revert --apply"))
+    return "\n".join(lines)
