@@ -39,7 +39,13 @@ create table wiki.access_event (
   -- believes it.
   process      jsonb,
 
-  constraint access_event_action_known check (action in ('open')),
+  -- Reads, and the mutations that carry a caller. Not one per FUSE operation:
+  -- write() gets a file handle and no process at all, so a 'write' here is the
+  -- rename that lands an editor's temp file on a real path, which is where the
+  -- bytes actually become a draft. An in-place save carries no rename and
+  -- shows up as an 'open' whose open_flags say O_WRONLY|O_TRUNC.
+  constraint access_event_action_known
+    check (action in ('open', 'create', 'write', 'delete', 'move')),
   -- A record that predates the wiki, or arrives from the future, is a broken
   -- client clock rather than a fact. Keep it, but keep it recognisable.
   constraint access_event_when check (occurred_at > '2020-01-01'::timestamptz)
@@ -121,3 +127,87 @@ comment on function wiki.record_opens(jsonb) is
   'from the payload.';
 
 grant execute on function wiki.record_opens(jsonb) to fswiki_user;
+
+------------------------------------------------------------------------------
+-- Reading a document, and recording that you did
+------------------------------------------------------------------------------
+
+-- The same content a GET on `syncable_document` returns, plus the access
+-- event, in one round trip and one transaction.
+--
+-- The verb is the whole trick. PostgREST runs GET in a **read-only**
+-- transaction, which is why recording an access on the read itself looked
+-- like it needed an escape hatch — pg_notify, or dblink to a second
+-- connection, both of which mean a privileged channel driven by client input
+-- (docs/audit-trail.md has the measurements). POST has no such restriction.
+-- And it is not a misuse of the verb: a request that records something is not
+-- idempotent, which is precisely what POST is for. The read is a side effect
+-- of the recording as much as the other way round.
+--
+-- SECURITY INVOKER, and `syncable_document` is itself a security_invoker view,
+-- so this is exactly as filtered as the GET it replaces. It is a second way to
+-- read what you could already read, not a second answer about what you may.
+--
+-- What it changes is who is making the claim. Events off the client queue are
+-- the client's word that a read happened; this row is the server's own record
+-- of having served the bytes. The `process` field is still the client
+-- describing itself and still forgeable — but "this token was handed this
+-- document at this time" becomes something the server witnessed.
+create or replace function wiki.read_document(
+  p_document uuid,
+  p_event    jsonb default null
+)
+returns table (content text)
+language plpgsql volatile
+set search_path = wiki, public, pg_temp as $$
+declare
+  v_user    uuid := wiki.current_user_id();
+  v_content text;
+  v_found   boolean;
+begin
+  select d.content into v_content
+    from wiki.syncable_document d
+   where d.id = p_document;
+  v_found := found;
+
+  -- Recorded whether or not the read succeeded: a request for something you
+  -- cannot have is the more interesting half of an access log. document_id is
+  -- only filled in when the row was actually visible, because the foreign key
+  -- would otherwise reject a probe for an id that does not exist and take the
+  -- read down with it. The path travels in the payload regardless, so a probe
+  -- still leaves a mark.
+  if v_user is not null and p_event is not null then
+    insert into wiki.access_event
+      (event_id, principal_id, document_id, path, occurred_at, action,
+       open_flags, process)
+    values (
+      (p_event ->> 'event_id')::uuid,
+      v_user,
+      case when v_found then p_document end,
+      (p_event ->> 'path')::ltree,
+      coalesce((p_event ->> 'occurred_at')::timestamptz, now()),
+      coalesce(p_event ->> 'action', 'open'),
+      (p_event ->> 'open_flags')::integer,
+      p_event -> 'process'
+    )
+    -- The client queues the same event under the same id before it gets here,
+    -- so whichever arrives second is a no-op. That is what lets the queue be a
+    -- fallback for the cases this cannot see — a refused open, a body served
+    -- from a draft, a laptop with no network — without double-counting the
+    -- ones it can.
+    on conflict (event_id) do nothing;
+  end if;
+
+  if v_found then
+    return query select v_content;
+  end if;
+  return;
+end;
+$$;
+
+comment on function wiki.read_document(uuid, jsonb) is
+  'Read one document''s body and record the access in the same transaction. '
+  'POST rather than GET because PostgREST runs GET read-only. Identical '
+  'visibility to selecting from syncable_document, which it does as invoker.';
+
+grant execute on function wiki.read_document(uuid, jsonb) to fswiki_user;

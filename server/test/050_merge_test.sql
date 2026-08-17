@@ -152,3 +152,96 @@ select wiki_test.expect_eq('nobody reads anybody else''s trail',
 reset role;
 
 
+
+------------------------------------------------------------------------------
+-- Reading a document and recording it in one transaction
+------------------------------------------------------------------------------
+--
+-- The point of read_document is that the read and the record of it commit
+-- together. PostgREST runs GET in a read-only transaction, so a GET cannot
+-- write its own audit row; POST can, and this is a POST-only RPC. What the
+-- tests below have to establish is that buying that did not buy a second
+-- opinion on who may read what.
+
+select wiki_test.login('bob');
+set role fswiki_user;
+
+-- Same rows as the view, because it *is* the view: SECURITY INVOKER over a
+-- security_invoker view. If these two ever disagree, the function has become a
+-- way to read something the ordinary path refuses.
+select wiki_test.expect_eq('read_document returns what the view returns',
+  (select content from wiki.read_document(
+     (select id from wiki.syncable_document where path = 'root.public.welcome'))),
+  (select content from wiki.syncable_document where path = 'root.public.welcome'));
+
+-- Measured as a delta, because the fixtures above already left events on this
+-- path. Reading without an event must add nothing at all.
+create temp table _no_event as
+  select (select count(*)::int from wiki.access_event) as before,
+         (select count(*)::int from wiki.read_document(
+            (select id from wiki.syncable_document where path = 'root.public.welcome')))
+           as rows_returned;
+
+select wiki_test.expect_eq('reading without an event records nothing',
+  (select count(*)::int from wiki.access_event) - (select before from _no_event), 0);
+
+select wiki_test.expect_eq('and still hands back the document',
+  (select rows_returned from _no_event), 1);
+
+select wiki_test.expect_eq('reading with one returns the content too',
+  (select count(*)::int from wiki.read_document(
+     (select id from wiki.syncable_document where path = 'root.public.welcome'),
+     jsonb_build_object('event_id', '44444444-4444-4444-4444-444444444444',
+                        'path', 'root.public.welcome',
+                        'occurred_at', now(),
+                        'action', 'open',
+                        'process', jsonb_build_object('comm', 'cat')))), 1);
+
+select wiki_test.expect_eq('and the access landed in the same breath',
+  (select count(*)::int from wiki.access_event
+    where event_id = '44444444-4444-4444-4444-444444444444'
+      and path = 'root.public.welcome'
+      and document_id is not null), 1);
+
+-- The client queues every event before offering it to a fetch, so the same id
+-- routinely arrives twice: once on the read, once off the queue. One row.
+select wiki_test.expect_eq('the queue''s copy of the same event is a no-op',
+  wiki.record_opens(jsonb_build_array(
+    jsonb_build_object('event_id', '44444444-4444-4444-4444-444444444444',
+                       'path', 'root.public.welcome',
+                       'occurred_at', now(), 'action', 'open'))), 0);
+
+reset role;
+
+-- Something bob cannot see at all. The read must come back empty, and the
+-- attempt must still be recorded: a request for what you may not have is the
+-- half of an access log worth reading.
+select wiki_test.login('bob');
+set role fswiki_user;
+
+select wiki_test.expect_eq('a document bob cannot sync yields no content',
+  (select count(*)::int from wiki.read_document(
+     '99999999-9999-9999-9999-999999999999',
+     jsonb_build_object('event_id', '55555555-5555-5555-5555-555555555555',
+                        'path', 'root.secret.plans',
+                        'occurred_at', now(), 'action', 'open'))), 0);
+
+select wiki_test.expect_eq('but the attempt is on the record',
+  (select count(*)::int from wiki.access_event
+    where event_id = '55555555-5555-5555-5555-555555555555'), 1);
+
+-- document_id stays null there on purpose: it is a foreign key, and a probe
+-- for an id that does not exist would otherwise abort the read it was
+-- attached to. The path in the payload is what identifies the attempt.
+select wiki_test.expect_eq('with no document_id, since none resolved',
+  (select count(*)::int from wiki.access_event
+    where event_id = '55555555-5555-5555-5555-555555555555'
+      and document_id is null and path = 'root.secret.plans'), 1);
+
+-- The identity on the row is the token's, whatever the payload says.
+select wiki_test.expect_eq('the event is filed against the reader',
+  (select count(*)::int from wiki.access_event
+    where event_id = '55555555-5555-5555-5555-555555555555'
+      and principal_id = wiki_test.who('bob')), 1);
+
+reset role;
