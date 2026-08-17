@@ -100,7 +100,7 @@ If links are resolved to their targets during rendering, the fragment becomes
 per-reader and the cache dies. So the renderer emits links in a **neutral
 form** that names the target path and decides nothing:
 
-    <a data-doc="root.engineering.onboarding">Onboarding</a>
+    <a href="/-/fswiki/root.engineering.onboarding">Onboarding</a>
 
 and a per-request pass over the anchors decides what each one becomes. A page
 has tens of links; walking them is microseconds against a 0.6 ms render, so the
@@ -126,7 +126,11 @@ same reasoning that makes `push()` report a create collision as `forbidden`
 rather than handing back the occupant's content.
 
 The corollary is that link liveness cannot be baked into a shared cache entry,
-which is why the neutral form above is not merely tidy.
+which is why the neutral form above is not merely tidy. `render.links.resolve`
+takes a callable that answers "what URL should this reader follow for this
+path, if any", and `render.links.unresolved` counts anchors that never went
+through it — a composed page has none, and serving a cached body without
+composing it is the mistake worth catching automatically.
 
 ## Raw HTML is off
 
@@ -146,25 +150,87 @@ Two layers, because the parser and the sanitiser fail differently:
    producing something unpleasant. Sanitising the output catches what the
    parser was never asked about.
 
-## markdown-it-py
+## Pluggable backends
 
-Three reasons, none of them speed — it and mistune are within 2 % of each other.
+No engine is settled on, so none is baked in. The seam is deliberately narrow:
 
-**It implements CommonMark, which is a specification rather than a dialect.**
-The filesystem is the source of truth here, and files get edited by tools that
-know nothing about us. A document should mean the same thing to every one of
-them.
+    [[wikilinks]]  ->  backend.to_html()  ->  sanitise
 
-**The token stream is the API we actually need.** Neutral links and stable
-heading anchors are both link/heading renderer overrides, which markdown-it-py
-expresses directly as `md.renderer.rules[...]`. This is not a place to be
-fighting the library, because getting link rendering wrong is the leak above.
+Only the middle step is pluggable. A backend converts markup to HTML and does
+nothing else — no wiki links, no sanitising, no opinion about who may read
+what. Everything specific to this wiki lives on either side of it, in code that
+does not change when the backend does.
 
-**There is a markdown-it in JavaScript.** A browser-side live preview that has
-to agree with the server can, and the day we want typing-latency preview that
-is the only way to get it without shipping two dialects.
+**The backend is pluggable precisely because the invariants are not.** The
+link-graph leak above is a security property; a security property that each
+backend has to reimplement is one that some backend will eventually get wrong.
+Sanitising is not offered as a backend's choice for the same reason — a
+document is written by one user and read by another, and which engine an
+operator installed should not decide what a reader's browser executes.
 
-python-markdown is 1.8× slower and is a dialect, not CommonMark.
+A backend is three attributes and a function:
+
+    class Backend(Protocol):
+        name: str                      # stable; part of the cache key
+        version: str                   # the library's, so an upgrade misses the cache
+        content_types: tuple[str, ...]
+        def to_html(self, text: str) -> str: ...
+
+Selection is by **`content_type`**, which the schema already carries per
+revision. So a second markup language is a registration and nothing else — no
+new column, no branch anywhere in the read path. `$FSWIKI_RENDERER` pins a
+particular engine for a deployment; an explicit argument beats both.
+
+Nothing is a hard dependency. Each shipped backend registers itself only if its
+library imports, so a build without them still gives a working client, and
+`fswiki render --list-backends` says what this installation actually has:
+
+    $ fswiki render --list-backends
+      markdown-it-py   4.2.0      text/markdown
+      mistune          3.3.3      text/markdown
+      plain            1          text/plain
+
+`markdown-it-py` is preferred where present, because CommonMark is a
+specification rather than a dialect and the filesystem is the source of truth —
+files here get edited by tools that know nothing about us, and a document should
+mean the same thing to all of them. There is also a markdown-it in JavaScript,
+which is the only way a future browser-side live preview agrees with the server
+without shipping two dialects. `mistune` is within 2 % on speed and ships as the
+second opinion. `plain` needs no library at all.
+
+### The renderer is part of the cache key
+
+`Rendered.renderer` identifies the whole pipeline, not just the engine:
+
+    markdown-it-py/4.2.0+fswiki1
+
+That goes in the cache key beside `(document_id, version)`. Leave it out and
+switching engines — or upgrading one — quietly serves output that the code now
+running would not produce. The `+fswiki<n>` suffix is the pre- and post-passes'
+own version, because they affect the bytes too.
+
+### Conformance, and why it is not optional
+
+A plugin seam is a promise about behaviour, and a promise nobody checks is a
+comment. `core/test/conformance.py` runs the same cases against **every
+registered backend**: raw HTML never survives, no `javascript:` href survives,
+a wikilink becomes an anchor under the reserved prefix, a forbidden link is
+byte-identical to a missing one, and the renderer id names the engine.
+
+It does not compare HTML byte for byte. Engines differ on whitespace, attribute
+order and whether a lone image gets a paragraph, and none of that matters.
+
+It earned its place on the first run. The neutral link form was originally a
+custom URL scheme, `fswiki:`, which markdown-it-py was perfectly happy with —
+and which **mistune rewrote to `#harmful-link`**, because it allowlists link
+schemes for exactly the reason we do. The target was gone before the post-pass
+could see it. A relative path under a reserved prefix, `/-/fswiki/<ltree>`, is
+an ordinary link that every engine accepts, and `/-/` can never collide with a
+document because a slug may be neither empty nor contain a slash.
+
+That is the whole argument for building two backends rather than one: a seam
+with a single implementation is not a seam, it is an abstraction that has never
+met a second case and therefore still encodes the first one's assumptions.
 
 ## Locally
 
@@ -186,11 +252,23 @@ Local rendering has two requirements the server does not:
 The shape:
 
     fswiki render engineering/onboarding.md     # HTML to stdout
-    fswiki preview                              # localhost, watches, reloads
+    fswiki render --draft engineering/notes.md   # your unpublished version
+    fswiki render --raw ...                      # links left as a cache holds them
+    fswiki preview                               # localhost, watches, reloads
 
-`render` first, because it is the composable half and the previewer's own
-inner loop, and because a thing that prints to stdout can be tested by a shell
-script the way everything else here is.
+Both exist. `render` came first because it is the composable half and the
+previewer's own inner loop, and because a thing that prints to stdout can be
+tested by a shell script the way everything else here is. `--raw` prints
+exactly what a shared cache would hold, which is the only way to see the
+difference between the two halves of the split above.
+
+`preview` is **read-only by construction**: every method but GET and HEAD is
+refused before the request is routed, so the property survives whatever routes
+get added later. It is not, however, *authenticated* — it holds one token and
+answers as one identity, which is right for a preview and is why binding it to
+a non-loopback address says out loud what that exposes. The remote service
+below is the one that has to make a per-visitor permission decision, and it is
+a different program for that reason.
 
 `preview` is editor-agnostic on purpose. vim, emacs and VS Code all save
 through the rename dance the mount already handles; a browser pointed at
