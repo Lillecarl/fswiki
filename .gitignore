@@ -4,3 +4,7 @@
 # nix-build output
 /result
 /result-*
+
+# Python bytecode from running the modules straight out of the tree
+__pycache__/
+*.pyc
