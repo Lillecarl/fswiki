@@ -151,6 +151,21 @@ class Client:
         body = rows[0].get("content")
         return b"" if body is None else body.encode("utf-8")
 
+    async def document(self, path: str) -> dict | None:
+        """One document by path, with its body, or None if it is not there.
+
+        Through `syncable_document` like every other read here, so "not there"
+        and "not yours to mirror" are the same answer — which is the answer a
+        renderer wants, since telling them apart is how a link graph leaks.
+        """
+        r = await self._http.get(
+            "/syncable_document",
+            params={"select": "id,path,content,content_type,version",
+                    "path": f"eq.{path}"},
+        )
+        rows = self._rows(r)
+        return rows[0] if rows else None
+
     # -- drafts ------------------------------------------------------------
 
     async def drafts(self) -> list[dict]:

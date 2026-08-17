@@ -89,3 +89,35 @@ def ltree_labels(path: str) -> list[str]:
 def ltree_parent(path: str) -> str | None:
     head, sep, _ = path.rpartition(".")
     return head if sep else None
+
+
+def from_display(path: str) -> str:
+    """`public/welcome` -> `root.public.welcome`.
+
+    The inverse of a display path: slash-separated, `root` optional, and no
+    extension expected — a wikilink names a document, and the content type is
+    not part of a document's identity.
+
+    A trailing extension is accepted and dropped, so `[[public/welcome.md]]`
+    and `[[public/welcome]]` mean the same thing. Anything else that is not a
+    slug raises, rather than being coerced into one: a link to a name the wiki
+    could never hold should stay literal text.
+    """
+    parts = [p for p in path.replace("\\", "/").split("/") if p not in ("", ".")]
+    if parts and parts[0] == "root":
+        parts = parts[1:]
+    if not parts:
+        return "root"
+
+    labels = []
+    for index, part in enumerate(parts):
+        if index == len(parts) - 1 and "." in part:
+            parsed = parse_filename(part)
+            if parsed is None:
+                raise ValueError(f"{part!r} is not a name the wiki can hold")
+            labels.append(parsed[0])
+            continue
+        if not is_slug(part):
+            raise ValueError(f"{part!r} is not a valid path element")
+        labels.append(part)
+    return ".".join(["root", *labels])
