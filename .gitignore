@@ -1,0 +1,6 @@
+# fswiki-dev state: pgdata, the dev JWT secret, sockets
+/.dev/
+
+# nix-build output
+/result
+/result-*
