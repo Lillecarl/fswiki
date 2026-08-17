@@ -1,0 +1,146 @@
+# fswiki CLI
+
+Publishing half of the working copy. The mount records drafts; this turns them
+into published revisions.
+
+    nix-build .. -A cli
+    eval "$(fswiki-dev env)"
+    export FSWIKI_TOKEN=$(fswiki-dev token bob)
+
+    fswiki status                    # what you have pending
+    fswiki diff                      # what would change
+    fswiki push -m "fix the guide"   # publish all of it
+    fswiki push -m "..." a/b.md      # publish a subset
+    fswiki push -n -m "..."          # dry run
+
+It depends on `fswiki-core`, not on the FUSE client, so publishing from a server
+or a CI job does not require the ability to mount anything.
+
+## Paths
+
+Three forms are accepted, tried in this order:
+
+1. **A file inside a mount.** The FUSE client exposes `user.fswiki.path` as an
+   extended attribute, so the exact document path is read off the file rather
+   than reconstructed. This is the only form that is certainly right.
+2. **An ltree path** — `root.public.welcome` — used as given.
+3. **A filesystem path** — `public/welcome.md` — converted by stripping the
+   extension and joining with dots.
+
+## Push is all or nothing
+
+If any entry comes back with a status other than `published`, **nothing was
+written** and your drafts are exactly where they were. The exit code is 1 and
+every entry is printed, not just the first — a changeset can fail on its third
+document while the first two looked fine.
+
+    $ fswiki push -m "my edit"
+    Push refused: 1 of 1 could not be applied.
+
+        CONFLICT  engineering/onboarding
+                  the server is now at revision 4
+                  edited from revision 3 but the server is at 4
+
+    Nothing was published and your drafts are untouched.
+
+A conflict means someone published while you were editing.
+
+## Merging
+
+`push()` returns all three sides of a conflict, so the report says whether it is
+one worth your attention:
+
+    $ fswiki push -m "my edit"
+    Push refused: 1 of 1 could not be applied.
+
+        CONFLICT  engineering/onboarding
+                  the server is now at revision 5
+                  edited from revision 4 but the server is at 5
+                  merges cleanly
+
+    Merge them with: fswiki merge
+
+`fswiki merge` is a dry run unless you pass `--apply`, because merging rewrites
+work you have not published yet. With `--apply` it rewrites each conflicting
+draft with the merged text and rebases it onto the server's revision, so the
+next push is an ordinary one.
+
+    $ fswiki merge --apply
+    Merged 1 draft.
+
+          merged  engineering/onboarding
+
+Nothing in it calls `push()`. Push commits the moment every row is publishable,
+so using it to *ask* what conflicts would publish the drafts that do not; the
+manifest already carries each document's live revision, which is the same
+comparison, and the other two sides are plain reads.
+
+### Conflicts are marked, not resolved
+
+Where both sides changed the same lines, the merge leaves markers:
+
+    <<<<<<< yours
+    BRAVO-bob
+    =======
+    BRAVO-frank
+    >>>>>>> server
+
+Marker length adapts. Content that already contains a seven-character marker —
+a page documenting a merge tool, say — gets eight-character markers around it,
+so the nesting stays unambiguous. This is what jj does, for the same reason.
+
+**Two separate guards stop a half-resolved merge being published**, and they
+answer different questions.
+
+The *server* refuses any draft still flagged `conflicted`. That flag is set by
+the merge and cleared only when the client says the resolution is done, so it
+does not depend on anyone's client behaving:
+
+        UNMERGED  engineering/onboarding
+                  the merge is unresolved; finish it or back it out
+
+The *client* refuses text that still contains markers. That check has to be
+client-side, because the server has no idea what a marker is and a page that
+explains them must stay publishable:
+
+    $ fswiki push -m "oops"
+    Push refused: 1 draft still contains unresolved conflict markers.
+
+      UNMERGED  engineering/onboarding
+
+Deleting the markers is what makes a draft resolved, so the marker check is how
+the client decides to clear the flag — and `push` does that for you. What the
+server will not do is take the client's word for a resolution it has not made.
+
+### Backing out
+
+    $ fswiki merge --abort
+        restored  engineering/onboarding
+
+The merge kept the text it replaced, so this restores it byte for byte. It is
+available whether the merge conflicted or not — a clean merge also rewrote work
+you had not published, and you are entitled to change your mind.
+
+`base_version` deliberately does not move when you merge; the rebase happens
+when the merge is resolved. So backing out has nothing to undo but the text, and
+a draft can never claim to descend from a revision it has not really been
+reconciled with.
+
+Published history is never involved in any of this.
+
+## Known gaps
+
+- `diff` fetches the published body of every selected draft, one request each.
+  Fine for a handful, wasteful for a hundred. `merge` is worse: three reads per
+  conflicting draft.
+- `merge` cannot help a create/create collision — there is no common ancestor,
+  so the answer is a different name — and it says so rather than guessing.
+- `merge --abort` backs out the text, not a `delete`d or `move`d draft's other
+  fields. Those operations carry no content to merge, so nothing rewrites them.
+- Still no `revert` for an ordinary draft. Withdrawing one means deleting the
+  file through the mount, or `DELETE /draft?path=eq.<ltree>`.
+- No `acl` verbs. `wiki.explain_acl()` is the intended backend and returns the
+  ACL in the order it is consulted, including the two rules that skip it — a
+  superuser, and an owner's standing `grant`.
+- No `acl` verbs. `wiki.explain_acl()` is the intended backend and already
+  returns the ACL in the order it is consulted.
