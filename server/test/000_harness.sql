@@ -1,0 +1,130 @@
+-- Minimal assertion harness. Results are collected rather than raised so that
+-- one run reports every failure instead of stopping at the first.
+
+create schema if not exists wiki_test;
+
+create table if not exists wiki_test.result (
+  seq    serial primary key,
+  label  text not null,
+  ok     boolean not null,
+  detail text
+);
+
+-- SECURITY DEFINER so assertions still record while the session has SET ROLE to
+-- an unprivileged wiki role.
+create or replace function wiki_test.expect(p_label text, p_ok boolean, p_detail text default null)
+returns void
+language plpgsql security definer
+set search_path = wiki_test, pg_temp as $$
+begin
+  insert into wiki_test.result (label, ok, detail)
+  values (p_label, coalesce(p_ok, false), p_detail);
+end;
+$$;
+
+create or replace function wiki_test.expect_eq(p_label text, p_actual anyelement, p_expected anyelement)
+returns void
+language plpgsql security definer
+set search_path = wiki_test, pg_temp as $$
+begin
+  perform wiki_test.expect(
+    p_label,
+    p_actual is not distinct from p_expected,
+    format('expected %L, got %L', p_expected, p_actual));
+end;
+$$;
+
+-- Assert that a statement is refused by an RLS policy specifically. A policy
+-- violation on INSERT/UPDATE surfaces as insufficient_privilege; anything else
+-- coming back means the statement failed for the wrong reason and the test has
+-- not proved what it claims.
+--
+-- SECURITY INVOKER is load-bearing: as a definer function this executes the
+-- statement as the table owner, who bypasses RLS, so every negative test
+-- "succeeds" and the suite reports a hole as a pass. Recording the result still
+-- works because wiki_test.expect() is definer.
+create or replace function wiki_test.expect_denied(p_label text, p_sql text)
+returns void
+language plpgsql security invoker
+set search_path = wiki, wiki_test, public, pg_temp as $$
+begin
+  begin
+    execute p_sql;
+    perform wiki_test.expect(p_label, false, 'statement unexpectedly succeeded');
+  exception
+    when insufficient_privilege then
+      perform wiki_test.expect(p_label, true, 'rejected by policy');
+    when others then
+      perform wiki_test.expect(p_label, false, format('wrong error: %s (%s)', sqlerrm, sqlstate));
+  end;
+end;
+$$;
+
+-- Assert that a statement is refused by a constraint or trigger. Optionally
+-- pins the SQLSTATE so a test cannot pass on an unrelated failure.
+create or replace function wiki_test.expect_rejected(
+  p_label text, p_sql text, p_sqlstate text default null)
+returns void
+language plpgsql security invoker
+set search_path = wiki, wiki_test, public, pg_temp as $$
+begin
+  begin
+    execute p_sql;
+    perform wiki_test.expect(p_label, false, 'statement unexpectedly succeeded');
+  exception
+    when others then
+      if p_sqlstate is null or sqlstate = p_sqlstate then
+        perform wiki_test.expect(p_label, true, sqlerrm);
+      else
+        perform wiki_test.expect(p_label, false,
+          format('expected SQLSTATE %s, got %s: %s', p_sqlstate, sqlstate, sqlerrm));
+      end if;
+  end;
+end;
+$$;
+
+------------------------------------------------------------------------------
+-- Lookup helpers
+------------------------------------------------------------------------------
+
+-- SECURITY DEFINER on purpose. As invoker functions these resolve under the
+-- caller's own RLS, so a path the test subject cannot see comes back NULL and
+-- every assertion built on it passes vacuously — which is exactly how the
+-- owner-lockout test first "passed" while proving nothing.
+create or replace function wiki_test.doc(p_path text)
+returns uuid
+language plpgsql stable security definer
+set search_path = wiki, public, pg_temp as $$
+declare found uuid;
+begin
+  select id into found from wiki.document where path = p_path::ltree;
+  if found is null then
+    raise exception 'no such document: %', p_path;
+  end if;
+  return found;
+end;
+$$;
+
+create or replace function wiki_test.who(p_name text)
+returns uuid
+language sql stable security definer
+set search_path = wiki, public, pg_temp as $$
+  select wiki.principal_id('user', p_name);
+$$;
+
+-- Switch the session to a wiki user, the way PostgREST does: verify the token,
+-- stash its claims in a GUC, then drop to the low-privilege role.
+create or replace function wiki_test.login(p_subject text)
+returns void
+language plpgsql
+set search_path = wiki_test, pg_temp as $$
+begin
+  perform set_config(
+    'request.jwt.claims',
+    json_build_object('iss', 'https://idp.test', 'sub', p_subject)::text,
+    false);
+end;
+$$;
+
+grant usage on schema wiki_test to fswiki_user;
+grant execute on all functions in schema wiki_test to fswiki_user;
