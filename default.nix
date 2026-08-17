@@ -2,9 +2,11 @@
   pkgs ? import <nixpkgs> { },
 }:
 {
+  # PostgREST access and path naming, shared by both clients so that publishing
+  # a draft does not require the ability to mount a filesystem.
+  core = pkgs.callPackage ./core { };
   cli = pkgs.callPackage ./cli { };
   fuse = pkgs.callPackage ./fuse { };
-  server = pkgs.callPackage ./server { };
 
   # Local Postgres + PostgREST under process-compose. Not a component of the
   # product; it is what the components are developed against.
