@@ -1,0 +1,854 @@
+"""The pyfuse3 operations.
+
+Shape of the thing: one manifest request builds the whole visible tree, and
+document bodies are fetched lazily per open. Writes never touch published
+history — they land in `wiki.draft`, which is exactly the working copy the
+server already models. Publishing is `wiki.push()`, and that belongs to the CLI.
+
+Two ideas carry most of the weight.
+
+**Scratch files.** A name the server could never accept as a slug — `.foo.swp`,
+`bar.md~`, `#notes#` — becomes a local-only file held in memory and never sent
+anywhere. Without this the mount is unusable with a normal editor, because vim,
+emacs and VS Code all save by writing a sibling temp file and renaming it over
+the target. With it, that dance works: the rename is what turns buffered bytes
+into a draft.
+
+**Everything is judged server-side.** The capability sets in the manifest decide
+which mode bits to show, and nothing more. A write the ACL forbids fails when
+the draft is posted, not because this file guessed.
+"""
+
+from __future__ import annotations
+
+import errno
+import logging
+import os
+import stat
+from dataclasses import dataclass, field
+
+import anyio
+import pyfuse3
+
+from fswiki_core import naming
+from fswiki_core.client import Client, PostgrestError
+from .inodes import ROOT_INODE, InodeTable
+from .model import Node, Tree, build
+
+log = logging.getLogger(__name__)
+
+XATTR_PREFIX = "user.fswiki."
+
+
+@dataclass
+class Scratch:
+    """A local-only file or directory. Never leaves this process."""
+
+    key: str
+    parent_key: str
+    name: str
+    is_dir: bool = False
+    data: bytearray = field(default_factory=bytearray)
+    mtime: float = 0.0
+
+    @property
+    def size(self) -> int:
+        return len(self.data)
+
+
+@dataclass
+class Handle:
+    """One open file."""
+
+    key: str
+    data: bytearray
+    writable: bool
+    dirty: bool = False
+
+
+class FswikiFs(pyfuse3.Operations):
+    supports_dot_lookup = True
+    enable_writeback_cache = False
+
+    def __init__(
+        self,
+        client: Client,
+        principal_id: str | None,
+        *,
+        ttl: float = 5.0,
+        poll: float | None = None,
+        read_only: bool = False,
+    ) -> None:
+        super().__init__()
+        self._client = client
+        self._principal_id = principal_id
+        # What the kernel is told it may cache for.
+        self._ttl = ttl
+        # How often we are willing to ask the server anything at all. Defaults
+        # to the kernel TTL, but can be shorter: a poll is eleven bytes, so
+        # checking more often than the kernel asks is nearly free.
+        self._poll = ttl if poll is None else poll
+        self._read_only = read_only or principal_id is None
+
+        self._inodes = InodeTable()
+        self._tree: Tree | None = None
+        self._fetched_at = float("-inf")
+        self._checked_at = float("-inf")
+        self._token: str | None = None
+        self._token_supported = True
+        self._refresh_lock = anyio.Lock()
+
+        self._scratch: dict[str, Scratch] = {}
+        self._scratch_seq = 0
+
+        self._handles: dict[int, Handle] = {}
+        self._handle_seq = 0
+
+        # key -> (etag, bytes). Bounded by the number of files ever opened in
+        # one mount, which for a wiki is fine; revisit if attachments arrive.
+        self._content: dict[str, tuple[str, bytes]] = {}
+
+        self._uid = os.getuid()
+        self._gid = os.getgid()
+
+    # ------------------------------------------------------------------
+    # Tree maintenance
+    # ------------------------------------------------------------------
+
+    async def refresh(self, *, force: bool = False) -> Tree:
+        """Bring the tree up to date, as cheaply as the server allows.
+
+        Two intervals, and keeping them apart is the whole point:
+
+        * `ttl` is what the *kernel* is told, so most operations never reach us
+          at all;
+        * `poll` is how often we ask the server anything, and what we ask is
+          `change_token()` — eleven bytes — not the six-kilobyte manifest.
+
+        So the steady state for an idle mount is one tiny request every `poll`
+        seconds, and a manifest fetch only when someone actually wrote
+        something.
+        """
+        if not force and self._tree is not None:
+            if anyio.current_time() - self._checked_at < self._poll:
+                return self._tree
+
+        async with self._refresh_lock:
+            # Re-check inside the lock: a burst of concurrent lookups should
+            # cost one request, not one each.
+            if not force and self._tree is not None:
+                if anyio.current_time() - self._checked_at < self._poll:
+                    return self._tree
+
+            # Always sampled *before* the manifest, never after. A write landing
+            # mid-fetch then leaves the stored token stale relative to the tree,
+            # so the next poll refreshes again — wasteful but correct. Sampling
+            # afterwards would record a token that already covers the write and
+            # silently lose it.
+            token: str | None = None
+            if self._token_supported:
+                try:
+                    token = await self._client.change_token()
+                    if token is None:
+                        log.debug("server has no change_token(); refetching every poll")
+                        self._token_supported = False
+                except PostgrestError as exc:
+                    log.debug("change_token failed, refetching: %s", exc)
+
+            if (
+                not force
+                and self._tree is not None
+                and token is not None
+                and token == self._token
+            ):
+                self._checked_at = anyio.current_time()
+                return self._tree
+
+            manifest = await self._client.manifest()
+            drafts = await self._client.drafts() if not self._read_only else []
+            tree = build(manifest, drafts)
+
+            self._inodes.pin_root(tree.root_key)
+            self._tree = tree
+            self._token = token
+            now = anyio.current_time()
+            self._checked_at = now
+            self._fetched_at = now
+            log.debug("manifest: %d documents, %d drafts", len(manifest), len(drafts))
+            return tree
+
+    async def _current(self) -> Tree:
+        try:
+            return await self.refresh()
+        except PostgrestError as exc:
+            log.error("manifest refresh failed: %s", exc)
+            if self._tree is None:
+                raise pyfuse3.FUSEError(errno.EIO) from exc
+            # Serve the last good tree rather than blanking the mount because
+            # the network blinked.
+            return self._tree
+
+    def _resolve(self, inode: int) -> Node | Scratch | None:
+        key = self._inodes.key_for(inode)
+        if key is None:
+            return None
+        if key in self._scratch:
+            return self._scratch[key]
+        return self._tree.get(key) if self._tree else None
+
+    def _parent_key(self, entry: Node | Scratch) -> str | None:
+        if isinstance(entry, Scratch):
+            return entry.parent_key
+        parent_path = naming.ltree_parent(entry.path)
+        if parent_path is None or self._tree is None:
+            return None
+        return self._tree.by_path.get(parent_path)
+
+    def _dir_entries(self, key: str) -> dict[str, Node | Scratch]:
+        """Everything visible inside a directory: server nodes then scratch."""
+        entries: dict[str, Node | Scratch] = {}
+        if self._tree is not None:
+            for name, child_key in self._tree.children.get(key, {}).items():
+                node = self._tree.get(child_key)
+                if node is not None:
+                    entries[name] = node
+        for scratch in self._scratch.values():
+            if scratch.parent_key == key:
+                entries[scratch.name] = scratch
+        return entries
+
+    # ------------------------------------------------------------------
+    # Attributes
+    # ------------------------------------------------------------------
+
+    def _attrs(self, inode: int, entry: Node | Scratch) -> pyfuse3.EntryAttributes:
+        attrs = pyfuse3.EntryAttributes()
+        attrs.st_ino = inode
+        attrs.st_uid = self._uid
+        attrs.st_gid = self._gid
+        attrs.st_rdev = 0
+        attrs.st_blksize = 4096
+
+        if isinstance(entry, Scratch):
+            if entry.is_dir:
+                attrs.st_mode = stat.S_IFDIR | 0o755
+                attrs.st_nlink = 2
+                attrs.st_size = 0
+            else:
+                attrs.st_mode = stat.S_IFREG | 0o644
+                attrs.st_nlink = 1
+                attrs.st_size = entry.size
+            mtime_ns = int(entry.mtime * 1e9)
+        else:
+            if entry.is_folder:
+                attrs.st_mode = stat.S_IFDIR | 0o755
+                attrs.st_nlink = 2
+                attrs.st_size = 0
+            else:
+                writable = entry.writable and not self._read_only
+                attrs.st_mode = stat.S_IFREG | (0o644 if writable else 0o444)
+                attrs.st_nlink = 1
+                attrs.st_size = entry.size
+            mtime_ns = int(entry.mtime.timestamp() * 1e9)
+
+        attrs.st_atime_ns = mtime_ns
+        attrs.st_ctime_ns = mtime_ns
+        attrs.st_mtime_ns = mtime_ns
+        attrs.st_blocks = (attrs.st_size + 511) // 512
+
+        # Matching the kernel's cache lifetime to the manifest's means a warm
+        # mount does not ask us anything at all between refreshes.
+        attrs.attr_timeout = self._ttl
+        attrs.entry_timeout = self._ttl
+        return attrs
+
+    # ------------------------------------------------------------------
+    # Lookup and directory reads
+    # ------------------------------------------------------------------
+
+    async def getattr(self, inode, ctx=None):
+        await self._current()
+        entry = self._resolve(inode)
+        if entry is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+        return self._attrs(inode, entry)
+
+    async def lookup(self, parent_inode, name, ctx=None):
+        tree = await self._current()
+        name = os.fsdecode(name)
+
+        parent = self._resolve(parent_inode)
+        if parent is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+
+        if name == ".":
+            return self._attrs(parent_inode, parent)
+        if name == "..":
+            if parent_inode == ROOT_INODE:
+                return self._attrs(ROOT_INODE, parent)
+            parent_key = self._parent_key(parent)
+            if parent_key is None:
+                raise pyfuse3.FUSEError(errno.ENOENT)
+            grandparent = tree.get(parent_key) or self._scratch.get(parent_key)
+            if grandparent is None:
+                raise pyfuse3.FUSEError(errno.ENOENT)
+            return self._attrs(self._inodes.inode_for(parent_key), grandparent)
+
+        parent_key = self._inodes.key_for(parent_inode)
+        entry = self._dir_entries(parent_key).get(name)
+        if entry is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+
+        inode = self._inodes.inode_for(entry.key)
+        self._inodes.remember(inode)
+        return self._attrs(inode, entry)
+
+    async def forget(self, inode_list):
+        for inode, count in inode_list:
+            self._inodes.forget(inode, count)
+
+    async def opendir(self, inode, ctx):
+        await self._current()
+        entry = self._resolve(inode)
+        if entry is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+        is_dir = entry.is_dir if isinstance(entry, Scratch) else entry.is_folder
+        if not is_dir:
+            raise pyfuse3.FUSEError(errno.ENOTDIR)
+
+        key = self._inodes.key_for(inode)
+        # Snapshot now: readdir may be called several times for one handle and
+        # the listing has to stay stable across them, whatever the TTL does.
+        listing = sorted(self._dir_entries(key).items())
+        fh = self._next_handle()
+        self._handles[fh] = listing  # type: ignore[assignment]
+        return fh
+
+    async def readdir(self, fh, start_id, token):
+        listing = self._handles.get(fh) or []
+        for index in range(start_id, len(listing)):
+            name, entry = listing[index]
+            inode = self._inodes.inode_for(entry.key)
+            if not pyfuse3.readdir_reply(
+                token, os.fsencode(name), self._attrs(inode, entry), index + 1
+            ):
+                return
+            self._inodes.remember(inode)
+
+    async def releasedir(self, fh):
+        self._handles.pop(fh, None)
+
+    # ------------------------------------------------------------------
+    # File reads
+    # ------------------------------------------------------------------
+
+    async def open(self, inode, flags, ctx):
+        await self._current()
+        entry = self._resolve(inode)
+        if entry is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+        if isinstance(entry, Node) and entry.is_folder:
+            raise pyfuse3.FUSEError(errno.EISDIR)
+        if isinstance(entry, Scratch) and entry.is_dir:
+            raise pyfuse3.FUSEError(errno.EISDIR)
+
+        writing = bool(flags & (os.O_WRONLY | os.O_RDWR))
+        if writing and self._read_only:
+            raise pyfuse3.FUSEError(errno.EROFS)
+        if writing and isinstance(entry, Node) and not entry.writable:
+            raise pyfuse3.FUSEError(errno.EACCES)
+
+        data = bytearray(await self._load(entry))
+        if flags & os.O_TRUNC:
+            data = bytearray()
+
+        fh = self._next_handle()
+        self._handles[fh] = Handle(
+            key=entry.key,
+            data=data,
+            writable=writing,
+            dirty=bool(flags & os.O_TRUNC) and writing,
+        )
+        return pyfuse3.FileInfo(fh=fh, keep_cache=False)
+
+    async def read(self, fh, off, size):
+        handle = self._handles.get(fh)
+        if not isinstance(handle, Handle):
+            raise pyfuse3.FUSEError(errno.EBADF)
+        return bytes(handle.data[off:off + size])
+
+    async def _load(self, entry: Node | Scratch) -> bytes:
+        if isinstance(entry, Scratch):
+            return bytes(entry.data)
+
+        # A draft is the author's own work and always wins over the published
+        # tip: that is what makes the working copy a working copy.
+        if entry.draft is not None and entry.draft.get("content") is not None:
+            return entry.draft["content"].encode("utf-8")
+        if entry.document_id is None or not entry.published:
+            return b""
+
+        etag = f"v{entry.version}"
+        cached = self._content.get(entry.key)
+        if cached is not None and cached[0] == etag:
+            return cached[1]
+
+        try:
+            data = await self._client.content(entry.document_id)
+        except LookupError:
+            raise pyfuse3.FUSEError(errno.ENOENT) from None
+        except PostgrestError as exc:
+            log.error("fetching %s: %s", entry.path, exc)
+            raise pyfuse3.FUSEError(errno.EIO) from exc
+
+        self._content[entry.key] = (etag, data)
+        return data
+
+    # ------------------------------------------------------------------
+    # Writes
+    # ------------------------------------------------------------------
+
+    async def write(self, fh, off, buf):
+        handle = self._handles.get(fh)
+        if not isinstance(handle, Handle):
+            raise pyfuse3.FUSEError(errno.EBADF)
+        if not handle.writable:
+            raise pyfuse3.FUSEError(errno.EBADF)
+
+        if off > len(handle.data):
+            handle.data.extend(b"\0" * (off - len(handle.data)))
+        handle.data[off:off + len(buf)] = buf
+        handle.dirty = True
+        return len(buf)
+
+    async def setattr(self, inode, attr, fields, fh, ctx):
+        entry = self._resolve(inode)
+        if entry is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+
+        if fields.update_size:
+            size = attr.st_size
+            if fh is not None and isinstance(self._handles.get(fh), Handle):
+                handle = self._handles[fh]
+                del handle.data[size:]
+                handle.data.extend(b"\0" * (size - len(handle.data)))
+                handle.dirty = True
+            elif isinstance(entry, Scratch):
+                del entry.data[size:]
+                entry.data.extend(b"\0" * (size - len(entry.data)))
+
+        # Mode, ownership and timestamps have nowhere to go: the wiki's
+        # permissions are the ACL, not a mode word. Accepting them silently is
+        # deliberate — editors chmod and utime as a matter of course, and
+        # failing here makes files unsaveable for no benefit.
+        return self._attrs(inode, entry)
+
+    async def flush(self, fh):
+        """Persist on close(), so the caller sees any error.
+
+        release() would be too late: the kernel does not report its result to
+        userspace, and a failed save that looks like a successful one is the
+        worst outcome available.
+        """
+        handle = self._handles.get(fh)
+        if not isinstance(handle, Handle) or not handle.dirty:
+            return
+        await self._persist(handle)
+        handle.dirty = False
+
+    async def fsync(self, fh, datasync):
+        await self.flush(fh)
+
+    async def release(self, fh):
+        self._handles.pop(fh, None)
+
+    async def _persist(self, handle: Handle) -> None:
+        entry = self._scratch.get(handle.key)
+        if entry is not None:
+            entry.data = bytearray(handle.data)
+            entry.mtime = anyio.current_time()
+            return
+
+        tree = self._tree
+        node = tree.get(handle.key) if tree else None
+        if node is None:
+            raise pyfuse3.FUSEError(errno.ESTALE)
+
+        await self._write_draft(node, bytes(handle.data))
+
+    async def _write_draft(self, node: Node, data: bytes) -> None:
+        """Record the buffer as this author's draft for the node's path."""
+        if self._read_only or self._principal_id is None:
+            raise pyfuse3.FUSEError(errno.EROFS)
+
+        text = data.decode("utf-8", errors="surrogateescape")
+
+        if node.document_id is None:
+            operation, base_version = "create", None
+        elif node.published:
+            operation, base_version = "update", node.version
+        else:
+            # A document row with no revision at all. wiki.draft's shape check
+            # demands a base_version for 'update', and publish_revision demands
+            # it match the live revision, which is none. There is no draft that
+            # satisfies both, so this path cannot be edited through push.
+            log.error("%s has no published revision; drafts cannot express an edit to it",
+                      node.path)
+            raise pyfuse3.FUSEError(errno.EPERM)
+
+        try:
+            await self._client.put_draft(
+                author_id=self._principal_id,
+                operation=operation,
+                path=node.path,
+                document_id=node.document_id,
+                content=text,
+                content_type=node.content_type,
+                base_version=base_version,
+            )
+        except PostgrestError as exc:
+            log.error("saving draft for %s: %s", node.path, exc)
+            raise pyfuse3.FUSEError(
+                errno.EACCES if exc.status in (401, 403) else errno.EIO
+            ) from exc
+
+        await self.refresh(force=True)
+
+    # ------------------------------------------------------------------
+    # Creation, removal, renaming
+    # ------------------------------------------------------------------
+
+    def _next_handle(self) -> int:
+        self._handle_seq += 1
+        return self._handle_seq
+
+    def _new_scratch(self, parent_key: str, name: str, *, is_dir: bool = False) -> Scratch:
+        self._scratch_seq += 1
+        scratch = Scratch(
+            key=f"scratch:{self._scratch_seq}",
+            parent_key=parent_key,
+            name=name,
+            is_dir=is_dir,
+            mtime=anyio.current_time(),
+        )
+        self._scratch[scratch.key] = scratch
+        return scratch
+
+    async def create(self, parent_inode, name, mode, flags, ctx):
+        tree = await self._current()
+        if self._read_only:
+            raise pyfuse3.FUSEError(errno.EROFS)
+
+        name = os.fsdecode(name)
+        parent_key = self._inodes.key_for(parent_inode)
+        parent = self._resolve(parent_inode)
+        if parent is None or parent_key is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+        if name in self._dir_entries(parent_key):
+            raise pyfuse3.FUSEError(errno.EEXIST)
+
+        parsed = naming.parse_filename(name)
+        parent_path = parent.path if isinstance(parent, Node) else None
+
+        if parsed is None or parent_path is None:
+            # Either an unrepresentable name, or a directory that has no
+            # server-side path yet. Both are local until a rename says otherwise.
+            scratch = self._new_scratch(parent_key, name)
+            inode = self._inodes.inode_for(scratch.key)
+            self._inodes.remember(inode)
+            fh = self._next_handle()
+            self._handles[fh] = Handle(key=scratch.key, data=bytearray(), writable=True)
+            return pyfuse3.FileInfo(fh=fh, keep_cache=False), self._attrs(inode, scratch)
+
+        slug, content_type = parsed
+        path = f"{parent_path}.{slug}"
+
+        try:
+            await self._client.put_draft(
+                author_id=self._principal_id,
+                operation="create",
+                path=path,
+                content="",
+                content_type=content_type,
+            )
+        except PostgrestError as exc:
+            log.error("creating %s: %s", path, exc)
+            raise pyfuse3.FUSEError(
+                errno.EACCES if exc.status in (401, 403) else errno.EIO
+            ) from exc
+
+        tree = await self.refresh(force=True)
+        node = tree.get(f"draft:{path}")
+        if node is None:
+            raise pyfuse3.FUSEError(errno.EIO)
+
+        inode = self._inodes.inode_for(node.key)
+        self._inodes.remember(inode)
+        fh = self._next_handle()
+        self._handles[fh] = Handle(key=node.key, data=bytearray(), writable=True)
+        return pyfuse3.FileInfo(fh=fh, keep_cache=False), self._attrs(inode, node)
+
+    async def mkdir(self, parent_inode, name, mode, ctx):
+        """Local only.
+
+        A folder has no independent existence to create: `wiki.push()`
+        materialises every folder on the path of a document it publishes. So a
+        new directory lives here until something inside it is pushed, at which
+        point the server's own folder takes over.
+        """
+        await self._current()
+        if self._read_only:
+            raise pyfuse3.FUSEError(errno.EROFS)
+
+        name = os.fsdecode(name)
+        parent_key = self._inodes.key_for(parent_inode)
+        if parent_key is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+        if name in self._dir_entries(parent_key):
+            raise pyfuse3.FUSEError(errno.EEXIST)
+
+        scratch = self._new_scratch(parent_key, name, is_dir=True)
+        inode = self._inodes.inode_for(scratch.key)
+        self._inodes.remember(inode)
+        return self._attrs(inode, scratch)
+
+    async def unlink(self, parent_inode, name, ctx):
+        tree = await self._current()
+        if self._read_only:
+            raise pyfuse3.FUSEError(errno.EROFS)
+
+        name = os.fsdecode(name)
+        parent_key = self._inodes.key_for(parent_inode)
+        entry = self._dir_entries(parent_key or "").get(name)
+        if entry is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+
+        if isinstance(entry, Scratch):
+            if entry.is_dir:
+                raise pyfuse3.FUSEError(errno.EISDIR)
+            del self._scratch[entry.key]
+            return
+
+        if entry.is_folder:
+            raise pyfuse3.FUSEError(errno.EISDIR)
+
+        # An unpublished draft is withdrawn outright; a published document gets
+        # a delete draft, which push turns into a tombstone.
+        if entry.document_id is None:
+            await self._drop_draft(entry.path)
+            return
+        if not entry.published:
+            raise pyfuse3.FUSEError(errno.EPERM)
+        if "delete" not in entry.capabilities:
+            raise pyfuse3.FUSEError(errno.EACCES)
+
+        try:
+            await self._client.put_draft(
+                author_id=self._principal_id,
+                operation="delete",
+                path=entry.path,
+                document_id=entry.document_id,
+                base_version=entry.version,
+            )
+        except PostgrestError as exc:
+            log.error("retiring %s: %s", entry.path, exc)
+            raise pyfuse3.FUSEError(errno.EIO) from exc
+        await self.refresh(force=True)
+
+    async def _drop_draft(self, path: str) -> None:
+        try:
+            await self._client.delete_draft(path)
+        except PostgrestError as exc:
+            log.error("dropping draft %s: %s", path, exc)
+            raise pyfuse3.FUSEError(errno.EIO) from exc
+        await self.refresh(force=True)
+
+    async def rmdir(self, parent_inode, name, ctx):
+        await self._current()
+        name = os.fsdecode(name)
+        parent_key = self._inodes.key_for(parent_inode)
+        entry = self._dir_entries(parent_key or "").get(name)
+        if entry is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+        if isinstance(entry, Node):
+            # Folder restructuring is an 'administer' operation and push has no
+            # implementation for it yet.
+            raise pyfuse3.FUSEError(errno.EPERM)
+        if not entry.is_dir:
+            raise pyfuse3.FUSEError(errno.ENOTDIR)
+        if self._dir_entries(entry.key):
+            raise pyfuse3.FUSEError(errno.ENOTEMPTY)
+        del self._scratch[entry.key]
+
+    async def rename(self, parent_old, name_old, parent_new, name_new, flags, ctx):
+        """The operation that makes editors work.
+
+        An atomic save is `write(tmp); rename(tmp, target)`, and `tmp` is a name
+        the server cannot hold. Handling it here is what turns a temp file's
+        bytes into a draft on the real path.
+        """
+        if flags != 0:
+            raise pyfuse3.FUSEError(errno.EINVAL)
+
+        tree = await self._current()
+        if self._read_only:
+            raise pyfuse3.FUSEError(errno.EROFS)
+
+        name_old = os.fsdecode(name_old)
+        name_new = os.fsdecode(name_new)
+        old_parent_key = self._inodes.key_for(parent_old)
+        new_parent_key = self._inodes.key_for(parent_new)
+        if old_parent_key is None or new_parent_key is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+
+        source = self._dir_entries(old_parent_key).get(name_old)
+        if source is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+
+        destination = self._dir_entries(new_parent_key).get(name_new)
+        new_parent = self._resolve(parent_new)
+        parsed = naming.parse_filename(name_new)
+        parent_path = new_parent.path if isinstance(new_parent, Node) else None
+
+        # Staying local: an unrepresentable target name, or a directory with no
+        # server path. Just move the scratch entry.
+        if parsed is None or parent_path is None:
+            if not isinstance(source, Scratch):
+                raise pyfuse3.FUSEError(errno.EPERM)
+            if isinstance(destination, Scratch):
+                del self._scratch[destination.key]
+            source.parent_key = new_parent_key
+            source.name = name_new
+            return
+
+        slug, content_type = parsed
+        target_path = f"{parent_path}.{slug}"
+
+        if isinstance(source, Scratch):
+            if source.is_dir:
+                raise pyfuse3.FUSEError(errno.EPERM)
+            # The interesting case: buffered bytes become a draft. If something
+            # is already published there this is an edit, otherwise a create.
+            target_node = tree.get(tree.by_path.get(target_path, ""))
+            data = bytes(source.data)
+            if target_node is not None and target_node.document_id and target_node.published:
+                await self._write_draft(target_node, data)
+                new_key = target_node.key
+            else:
+                await self._create_draft(target_path, content_type, data)
+                new_key = f"draft:{target_path}"
+
+            # After a rename the kernel keeps the *source* inode and files it
+            # under the new name — it does not re-look-up. So the scratch file's
+            # inode has to start resolving to whatever now lives at the target
+            # path, or the file the caller just saved reads back as ENOENT.
+            del self._scratch[source.key]
+            self._inodes.rekey(source.key, new_key)
+            return
+
+        if source.is_folder:
+            raise pyfuse3.FUSEError(errno.EPERM)
+        if destination is not None:
+            raise pyfuse3.FUSEError(errno.EEXIST)
+
+        if source.document_id is None:
+            # Renaming a draft that was never published: rewrite it in place.
+            data = (source.draft or {}).get("content") or ""
+            await self._create_draft(target_path, content_type, data.encode("utf-8"))
+            await self._drop_draft(source.path)
+            return
+
+        if not source.published:
+            raise pyfuse3.FUSEError(errno.EPERM)
+        try:
+            await self._client.put_draft(
+                author_id=self._principal_id,
+                operation="move",
+                path=target_path,
+                document_id=source.document_id,
+                base_version=source.version,
+            )
+        except PostgrestError as exc:
+            log.error("moving %s -> %s: %s", source.path, target_path, exc)
+            raise pyfuse3.FUSEError(errno.EIO) from exc
+        await self.refresh(force=True)
+
+    async def _create_draft(self, path: str, content_type: str, data: bytes) -> None:
+        try:
+            await self._client.put_draft(
+                author_id=self._principal_id,
+                operation="create",
+                path=path,
+                content=data.decode("utf-8", errors="surrogateescape"),
+                content_type=content_type,
+            )
+        except PostgrestError as exc:
+            log.error("creating draft %s: %s", path, exc)
+            raise pyfuse3.FUSEError(
+                errno.EACCES if exc.status in (401, 403) else errno.EIO
+            ) from exc
+        await self.refresh(force=True)
+
+    # ------------------------------------------------------------------
+    # Extended attributes: the ACL, readable from the shell
+    # ------------------------------------------------------------------
+
+    def _xattrs(self, entry: Node | Scratch) -> dict[str, str]:
+        if isinstance(entry, Scratch):
+            return {"state": "scratch (local only, never pushed)"}
+        values = {
+            "path": entry.path,
+            "capabilities": ",".join(sorted(entry.capabilities)),
+            "state": "draft" if entry.has_draft else "published",
+        }
+        if entry.document_id:
+            values["document_id"] = entry.document_id
+        if entry.version is not None:
+            values["version"] = str(entry.version)
+        if entry.owner_id:
+            values["owner_id"] = entry.owner_id
+        if entry.title:
+            values["title"] = entry.title
+        if entry.synthetic:
+            values["state"] = "synthetic (implied by a draft below it)"
+        if entry.draft:
+            values["draft_operation"] = entry.draft["operation"]
+        return values
+
+    async def listxattr(self, inode, ctx):
+        entry = self._resolve(inode)
+        if entry is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+        return [os.fsencode(XATTR_PREFIX + k) for k in self._xattrs(entry)]
+
+    async def getxattr(self, inode, name, ctx):
+        entry = self._resolve(inode)
+        if entry is None:
+            raise pyfuse3.FUSEError(errno.ENOENT)
+        key = os.fsdecode(name)
+        if not key.startswith(XATTR_PREFIX):
+            raise pyfuse3.FUSEError(pyfuse3.ENOATTR)
+        value = self._xattrs(entry).get(key[len(XATTR_PREFIX):])
+        if value is None:
+            raise pyfuse3.FUSEError(pyfuse3.ENOATTR)
+        return os.fsencode(value)
+
+    async def setxattr(self, inode, name, value, ctx):
+        # Administering the ACL through xattrs is the CLI's job and needs a
+        # grammar; refusing plainly beats accepting and discarding.
+        raise pyfuse3.FUSEError(errno.ENOTSUP)
+
+    # ------------------------------------------------------------------
+
+    async def statfs(self, ctx):
+        info = pyfuse3.StatvfsData()
+        info.f_bsize = 4096
+        info.f_frsize = 4096
+        info.f_blocks = 0
+        info.f_bfree = 0
+        info.f_bavail = 0
+        info.f_files = len(self._tree.nodes) if self._tree else 0
+        info.f_ffree = 0
+        info.f_favail = 0
+        info.f_namemax = 255
+        return info

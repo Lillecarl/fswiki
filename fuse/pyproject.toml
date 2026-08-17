@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fswiki-fuse"
+version = "0.1.0"
+description = "Mount an fswiki wiki as a filesystem"
+requires-python = ">=3.11"
+dependencies = [
+  "fswiki-core",
+  "pyfuse3>=3.3",
+  "trio>=0.22",
+  "anyio>=4.0",
+]
+
+[project.scripts]
+fswiki-mount = "fswiki_fuse.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["fswiki_fuse*"]

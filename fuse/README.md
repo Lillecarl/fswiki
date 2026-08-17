@@ -1,0 +1,118 @@
+# fswiki FUSE client
+
+The wiki as a directory tree on your own machine, so you can edit it with your
+editor and point tools at it.
+
+    nix-build .. -A fuse
+    eval "$(fswiki-dev env)"
+    ./result/bin/fswiki-mount --token "$(fswiki-dev token bob)" ~/wiki
+
+Runs in the foreground on **trio**, which is pyfuse3's native backend — no
+asyncio shim. httpx composes with it because httpcore is built on anyio.
+
+| module | |
+| --- | --- |
+| `naming.py` | filenames <-> ltree slugs, and what counts as scratch |
+| `client.py` | PostgREST over httpx; knows nothing about FUSE |
+| `model.py` | the manifest with drafts laid over it |
+| `inodes.py` | uuid <-> inode, and the kernel's lookup counting |
+| `fs.py` | the pyfuse3 operations |
+
+## What you see
+
+`wiki.syncable_document`, which is *not* the same as what you can read. `sync`
+is a separate capability, so a document can be perfectly readable in the browser
+and absent from the mount — that is the audit lever working, not a bug. Reads go
+through the syncable view too, never `current_document`, so there is no path by
+which a deny-sync document's body reaches local disk.
+
+One request builds the whole tree; bodies are fetched per open. Directory
+listings and `stat` cost nothing after that, because `size` comes down in the
+manifest.
+
+Mode bits are a rendering of the ACL, not a second opinion on it: `0444` without
+`write`, `0644` with. Every write is judged server-side when the draft is
+posted.
+
+## Writing
+
+Writes never touch published history. They land in `wiki.draft` — the working
+copy the server already models — and appear in place, so a file you have edited
+reads back what you wrote. Publishing is `wiki.push()`, which belongs to the
+CLI.
+
+    $ echo '# Notes' > ~/wiki/engineering/notes.md   # a 'create' draft
+    $ vim ~/wiki/engineering/onboarding.md           # an 'update' draft
+    $ rm ~/wiki/engineering/old.md                   # a 'delete' draft
+    $ mv ~/wiki/a/x.md ~/wiki/b/x.md                 # a 'move' draft
+
+### Scratch files
+
+A name the server cannot hold as a slug — `.foo.md.swp`, `bar.md~`, `#notes#` —
+becomes a **local-only file** kept in memory and never sent anywhere.
+
+This is not a workaround, it is what makes editors work at all. vim, emacs and
+VS Code save by writing a sibling temp file and renaming it over the target, and
+none of those temp names is representable server-side. Handling the rename is
+what turns the buffered bytes into a draft.
+
+`mkdir` is local for the same reason: `wiki.push()` materialises every folder on
+the path of a document it publishes, so a new directory has nothing to create
+until something inside it is pushed.
+
+## Extended attributes
+
+    $ getfattr -d -m . ~/wiki/public/guide/permissions.md
+    user.fswiki.capabilities="read,sync"
+    user.fswiki.document_id="a2b2fdcf-..."
+    user.fswiki.owner_id="c200d43c-..."
+    user.fswiki.path="root.public.guide.permissions"
+    user.fswiki.state="published"
+    user.fswiki.title="How permissions work"
+    user.fswiki.version="2"
+
+Read-only for now. `setxattr` returns `ENOTSUP` rather than accepting and
+discarding — administering the ACL needs a grammar, and that is the CLI's job.
+
+## Staleness
+
+The manifest is re-fetched every `--ttl` seconds (default 5), and the kernel is
+told it may cache entries and attributes for exactly that long — so a warm mount
+asks nothing at all between refreshes. Writing forces a refresh immediately, so
+your own edits are never stale to you. Someone else's edit takes up to the TTL
+to appear.
+
+If a refresh fails, the last good tree is served rather than blanking the mount.
+
+## Mounting needs a setuid `fusermount3`
+
+An unprivileged mount needs `CAP_SYS_ADMIN`, and nothing in the Nix store can be
+setuid. On NixOS the working binary is `/run/wrappers/bin/fusermount3`, which
+requires
+
+    programs.fuse.userAllowOther = true;   # or any option that pulls the wrapper in
+
+Without it the mount fails with `fusermount3: mount failed: Operation not
+permitted` even though `/dev/fuse` is present and writable. The wrapper script
+therefore puts the store's `fuse3` on the **end** of `PATH`, never the front —
+prefixing it shadows the setuid wrapper and produces exactly that error.
+
+For a throwaway test with no system configuration at all, a user namespace works,
+because libfuse mounts directly when it believes it is root:
+
+    unshare --user --map-root-user --mount --propagation private -- \
+      fswiki-mount ~/wiki
+
+## Known gaps
+
+- Folders cannot be renamed or removed server-side: push has no folder
+  restructuring, so `rmdir` on a real folder is `EPERM`.
+- A document row with no published revision (see `root.public.unpublished` in the
+  dev fixtures) cannot be edited. `wiki.draft`'s shape check demands a
+  `base_version` for an update and `publish_revision()` demands it match the live
+  revision, which is none — no draft satisfies both. It reads as an empty file
+  and writes fail with `EPERM`.
+- Creating over a locally-retired document makes a `create` draft, which push
+  will report as a conflict. Reinstating should be an update on the tombstone.
+- No content cache eviction. Fine for markdown, wrong the day attachments land.
+- `--allow-other` is passed through but untested.
