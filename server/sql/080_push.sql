@@ -44,7 +44,17 @@ create type wiki.push_result as (
   version         integer,   -- the revision published, when status = 'published'
   server_version  integer,   -- what the server currently holds, on conflict
   server_hash     bytea,
-  server_content  text,      -- so the client can merge without another round trip
+  server_content  text,      -- 'theirs', so the client can merge without another round trip
+  -- 'base': the revision the draft says it descends from. A three-way merge
+  -- needs all three sides, and this is the only one the client cannot
+  -- reconstruct — it has its own text, and server_content above gives it
+  -- theirs, but the common ancestor is a revision that is no longer live and
+  -- may never have been on this machine at all. Storing full checkouts is what
+  -- makes handing it back a lookup rather than a replay.
+  --
+  -- Null when there is no ancestor to speak of: a 'create' that collided with
+  -- an existing path never descended from anything.
+  base_content    text,
   detail          text
 );
 
@@ -215,7 +225,8 @@ begin
        and (p_paths is null or path = any(p_paths))
      order by nlevel(path), path
   loop
-    v_result := (d.path, d.operation, 'published', null, null, null, null, null)::wiki.push_result;
+    v_result := (d.path, d.operation, 'published',
+                 null, null, null, null, null, null)::wiki.push_result;
     v_doc    := null;
     v_live   := null;
 
@@ -243,6 +254,16 @@ begin
           v_result.server_version := v_live.version;
           v_result.server_hash    := v_live.content_hash;
           v_result.server_content := v_live.content;
+
+          -- The ancestor the draft descends from. It is a closed revision, so
+          -- it is found by version rather than by upper_inf(), and it can
+          -- legitimately be absent: base_version is null for a create, and a
+          -- draft can outlive the revision it named if history was purged.
+          select dv.content into v_result.base_content
+            from wiki.document_version dv
+           where dv.document_id = v_doc.id
+             and dv.version = d.base_version;
+
           v_result.detail := format(
             'edited from revision %s but the server is at %s',
             d.base_version, v_live.version);
@@ -395,7 +416,8 @@ begin
     v_results := array(
       select case when r.path = d.path and r.operation = d.operation
                   then (r.path, r.operation, r.status, v_version,
-                        r.server_version, r.server_hash, r.server_content, r.detail)::wiki.push_result
+                        r.server_version, r.server_hash, r.server_content,
+                        r.base_content, r.detail)::wiki.push_result
                   else r end
         from unnest(v_results) r);
   end loop;

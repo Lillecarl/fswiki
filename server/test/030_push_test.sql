@@ -70,6 +70,15 @@ select wiki_test.expect_eq('push: the conflict reports the server revision',
   (select server_version from push_conflict), 2);
 select wiki_test.expect_eq('push: and hands back the server content to merge from',
   (select server_content from push_conflict), 'Bob was here');
+
+-- All three sides of a three-way merge come back from the one call. 'mine' is
+-- the draft the client already holds; 'theirs' is server_content above; and
+-- base_content is revision 1, the ancestor, which is no longer live and which
+-- the client may never have had.
+select wiki_test.expect_eq('push: the conflict hands back the base revision too',
+  (select base_content from push_conflict), 'Contents of Onboarding');
+select wiki_test.expect_eq('push: base and server content are genuinely different',
+  (select base_content is distinct from server_content from push_conflict), true);
 select wiki_test.expect_eq('push: nothing was written',
   (select content from wiki.current_document where path = 'root.engineering.onboarding'),
   'Bob was here');
@@ -170,6 +179,10 @@ values (wiki.current_user_id(), 'create', 'root.engineering.guides.testing', 'cl
 create temporary table push_clobber as select * from wiki.push();
 select wiki_test.expect_eq('push: creating over an existing path conflicts',
   (select status::text from push_clobber), 'conflict');
+-- A create never descended from anything, so there is no ancestor to merge
+-- against and the client must be told that rather than shown an empty string.
+select wiki_test.expect_eq('push: a create collision has no base to merge from',
+  (select base_content is null from push_clobber), true);
 delete from wiki.draft;
 
 reset role;

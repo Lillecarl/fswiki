@@ -24,6 +24,10 @@ create view wiki.current_document
          d.updated_at,
          v.id   as version_id,
          v.version,
+         -- Who published the tip. A sync client needs this to tell "someone
+         -- moved past me" from "my own push landed": the first is a conflict in
+         -- waiting, the second means its working copy is already current.
+         v.author_id as version_author_id,
          v.content,
          -- Byte length, so a client can stat a file without fetching it. FUSE
          -- needs st_size on every getattr and would otherwise pull the whole
