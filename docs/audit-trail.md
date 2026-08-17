@@ -82,11 +82,26 @@ only gets worse for the HTTP side. There is nothing to defer.
 - `starttime` paired with `pid` identifies one process for as long as the box is
   up, which is what makes a queued record survive pid reuse.
 
-**argv leaks credentials.** `mysql -pSECRET`, `curl -H "Authorization: ..."` and
-friends all sit in `/proc/<pid>/cmdline` in the clear. Shipping full argv to a
-server means shipping unrelated secrets from the user's machine to the wiki's
-database, where they land in backups. Ship `exe` and `argv[0]` by default; put
-the full argv behind a separate, louder flag.
+**argv leaks credentials, so it is truncated.** `mysql -pSECRET`,
+`curl -H "Authorization: ..."` and friends all sit in `/proc/<pid>/cmdline` in
+the clear. Shipping full argv means taking secrets that have nothing to do with
+the wiki off the user's machine, putting them in someone else's database, and
+then in that database's backups — a worse leak than the one an audit trail is
+meant to catch.
+
+So `cmdline` is `argv[0]` and nothing else, with the count of what was dropped
+alongside it:
+
+    "cmdline": ["bash"], "argv_elided": 3
+
+The count matters. Without it a truncated command line is indistinguishable
+from a bare one, and a reader has no way to tell "they ran `bash`" from "they
+ran `bash` with three arguments you are not being shown". `exe` is unaffected
+and remains the field worth trusting.
+
+`--audit-argv` ships the whole of argv, for a fleet whose policy already says
+so. It logs a warning at startup, because that is the sort of flag that gets
+set once and then forgotten.
 
 ## The trust boundary
 
@@ -101,7 +116,11 @@ that one the client cannot forge.
 
 ## Transport
 
-Two things were measured against PostgREST, and together they settle the design:
+The audit event and the read it describes should land together. Getting there
+took a wrong turn worth recording, because the wrong turn is the one that looks
+clever.
+
+Two things were measured against PostgREST first:
 
 - Custom request headers *are* visible to Postgres, via
   `current_setting('request.headers')::json` — an `X-Fswiki-Audit` header comes
@@ -110,13 +129,13 @@ Two things were measured against PostgREST, and together they settle the design:
   `cannot execute INSERT in a read-only transaction`. The same function called
   over POST inserts fine.
 
-So a GET cannot write **to its own transaction**. That is not the end of it, and
-the shortcut turns out to work after all — you just have to leave the
-transaction to do it.
+That second line contains the answer, and it was read as an obstacle for
+longer than it should have been.
 
-### Getting out of the read-only transaction
+### The obstacle course
 
-Four escapes, all tested against the running stack:
+Taking "a GET cannot write" as fixed, there are four ways out of a read-only
+transaction, all tested against the running stack:
 
 | route | result |
 | --- | --- |
@@ -125,21 +144,13 @@ Four escapes, all tested against the running stack:
 | `pg_notify()` | ✓ **allowed in a read-only transaction** |
 | `dblink()` to a second connection | ✓ writes, and the row survives the outer `ROLLBACK` |
 
-The read-only flag applies to *this* transaction's writes. A notification is not
-a write, and a second connection is not this transaction.
-
-### The hook
-
-`db-pre-request` is a function PostgREST calls before every request, in the
-request's own transaction, and it can read `current_setting('request.headers')`.
-That is the whole mechanism — no view or RLS change is involved.
-
-Proven end to end: a plain content GET carrying
-`X-Fswiki-Audit: {"comm":"vim","pid":525459,"exe":"...","loginuid":1000}`
-returned `200` with the document, and the audit row landed. On the request, no
-extra round trip.
-
-### What it costs
+The read-only flag applies to *this* transaction's writes. A notification is
+not a write, and a second connection is not this transaction. Wire either to
+`db-pre-request` — a function PostgREST calls before every request, in the
+request's own transaction, where `current_setting('request.headers')` is
+readable — and a plain content GET carrying an `X-Fswiki-Audit` header returns
+`200` with the document while the audit row lands. Proven end to end, no view
+or RLS change involved.
 
 60 requests each against the dev stack, same document:
 
@@ -156,57 +167,90 @@ that function returns NULL rather than `{}` when nothing is open, so the guard
 never fires and every request 503s. It benchmarks beautifully, because failing
 early is fast.)
 
-### Which one, and what it costs you
+Both have a sting. `pg_notify` is **at-most-once** — no listener, no record —
+and the notify queue is shared and bounded, so a listener that connects and
+then stalls fills it, and once full **commits start failing across the whole
+database**. An audit listener that hangs can take the wiki down. `dblink` is
+durable, but the connection it opens is a second session driven by an
+attacker-supplied header: the probe used `user=postgres`, which puts a
+superuser channel one quoting bug away from that header, and doing it properly
+means a `postgres_fdw` foreign server, a user mapping and an insert-only role
+before it is safe to run at all.
 
-**`pg_notify` is free but it is at-most-once.** No listener, no record; a
-listener restart is a silent gap. Worse, the notify queue is shared and bounded:
-a listener that connects and then stalls fills it, and once full **commits start
-failing across the whole database**. An audit listener that hangs can take the
-wiki down. Same conclusion the notification bridge reached in
-[change-notification.md](change-notification.md) — good as a signal, not as the
-record.
+### Not using GET
 
-**`dblink` with a kept connection is the durable one**, at +2.5 ms synchronous.
-Prefer sync over async: the async variant is free only because it never looks at
-the result, so failures surface one request late and the last write of a session
-never reports at all.
+None of that is necessary. The read-only transaction is a property of the
+**verb**, and nothing requires a read to be a GET.
 
-Two things to get right before this goes anywhere near production:
+    POST /rpc/read_document   { "p_document": "...", "p_event": { ... } }
 
-- **Do not connect as a superuser.** The probe used `user=postgres`, which gives
-  every request a superuser channel out of a `SECURITY DEFINER` function whose
-  input is an attacker-supplied header. `format(%L)` quoting is correct and is
-  also the only thing standing between that header and SQL injection into a
-  superuser session. Use a dedicated role with `INSERT` on one table and nothing
-  else, so the worst case is a junk audit row.
-- **Put the credentials in the catalog, not the function body.** A
-  `postgres_fdw` foreign server plus a user mapping keeps the connection string
-  out of a routine anyone can read with `\df+`.
+`wiki.read_document()` selects the body from `syncable_document` and inserts
+the access event in the same transaction. One round trip, both or neither, no
+second connection, no header parsing, no privileged anything. The security
+question the `dblink` route raised does not come up, because there is no second
+session to secure.
 
-### What is actually built
+It is not even a misuse of the verb, which is the part that feels wrong for a
+moment. **A request that records something is not idempotent**, and that is
+precisely what POST is for. GET promises that repeating it changes nothing;
+an audited read breaks that promise. The audited read was never a GET.
 
-The header trick is real and measured, but it is not what ships events today,
-and the reason is the security note above: making it safe needs a dedicated
-`postgres_fdw` server, a user mapping, and an insert-only role, and getting any
-of that wrong puts an attacker-supplied header next to a privileged connection.
-The queue below has none of that exposure and covers the cases the header
-cannot — a content-cache hit that never reaches the network, and a laptop that
-is offline. The header remains the obvious optimisation once the audit path
-earns the extra machinery.
+What it costs is HTTP caching — POST responses are not cacheable, and
+conditional requests are gone. That is worth nothing here: the mount keeps its
+own cache keyed on the document's version, which is stronger than an ETag round
+trip, and nothing between the mount and PostgREST was caching anyway. Reads
+stay on GET when nobody is auditing, so the cheaper verb is still the default.
 
-What exists:
+The function is `SECURITY INVOKER` over a `security_invoker` view, so it is
+exactly as filtered as the GET it replaces. That is the one property worth
+testing rather than asserting, and the suite does: it compares the function's
+output against the view's, and checks that a document the caller cannot sync
+comes back empty through both.
+
+### What this changes about the record
+
+Events off the client queue are the client's word that a read happened. A row
+written by `read_document` is the server's own record of having served the
+bytes. The `process` field is still the client describing itself, and still
+forgeable — but *"this token was handed this document at this time"* becomes
+something the server witnessed rather than something it was told.
+
+### Why there is still a queue
+
+The fetch can only carry an event when there is a fetch. There often is not:
+
+* **a content-cache hit** — the mount holds bodies keyed by version, so a
+  re-read of an unchanged document never reaches the network;
+* **a body served from a draft** — your own unpublished work is local;
+* **a refused open** — it fails before any fetch, and an attempt on something
+  you may not have is the half worth keeping;
+* **a mutation** — a create, a delete or the rename that lands an editor's save
+  has no read to ride along on;
+* **no network at all** — the laptop is on a train.
+
+So both routes exist and the event is minted once, before either. The client
+queues it only if the fetch did not take it, and the id is generated up front
+so that when both happen anyway — a retry, a crash between the two — the
+server's `on conflict (event_id) do nothing` collapses them into one row. That
+is the same idempotency key the queue already needed; it pays for this too.
+
+### What exists
 
 * `wiki.access_event` — insert-only for `fswiki_user`, RLS so you see only your
   own trail. No update or delete grant at all: a trail its subject can rewrite
   is not one. The principal comes from the token, never from the payload.
-* `wiki.record_opens(jsonb)` — one round trip per batch, idempotent on the
-  client-generated `event_id`, so a resend returns 0 rather than duplicating.
-* `fswiki_fuse.audit.AuditLog` — the client queue described below.
+* `wiki.read_document(uuid, jsonb)` — the POST read above, which records the
+  access in the transaction that serves the bytes.
+* `wiki.record_opens(jsonb)` — one round trip per queue batch, idempotent on
+  the client-generated `event_id`, so a resend returns 0 rather than
+  duplicating.
+* `fswiki_fuse.audit.AuditLog` — the client queue.
 
 ### The queue
 
-1. `open()` captures inline and appends one JSON line to `audit.jsonl`, mode
-   0600, under `--audit-dir`. No fsync per event, no network, no lock.
+1. The event is captured inline and, if no fetch took it, appended as one JSON
+   line to `audit.jsonl`, mode 0600, under `--audit-dir`. No fsync per event,
+   no network, no lock.
 2. A background task ships it, every `--audit-interval` seconds and once more on
    unmount.
 3. **Rotation, not truncation.** The live file is renamed to `audit.sending.jsonl`
@@ -220,10 +264,34 @@ What exists:
    so in the log, and says so again when the queue drains — a gap nobody can see
    is indistinguishable from nothing having happened.
 
-Recorded at `open()`, after the entry resolves and *before* the permission
-checks, so a refused open is recorded too: an attempt on something you may not
-have is the more interesting half of an access log. Scratch files never leave
-the process and are never recorded.
+The cap is seeded from what is already on disk, not from zero. A queue that
+survived the last session still occupies the space it was capped by, and
+starting the count fresh would let every restart buy another 8 MB — which on a
+laptop that mounts twice a day is not a cap at all.
+
+Recorded after the entry resolves and *before* the permission checks, so a
+refused operation is recorded too: an attempt on something you may not have is
+the more interesting half of an access log. Scratch files never leave the
+process and are never recorded.
+
+### What counts as an event
+
+| action | what raised it |
+| --- | --- |
+| `open` | a file was opened; `open_flags` says whether for writing |
+| `create` | a new document, either `create()` or a save onto an empty path |
+| `write` | the rename that lands an editor's temp file on a real path |
+| `delete` | `unlink` on a document — a draft withdrawn or a page retired |
+| `move` | a published document renamed to another path |
+
+Not one row per FUSE operation, because FUSE will not support that: `read()`
+and `write()` are handed a file handle and no caller at all, so there is no
+process to attribute bytes to. An in-place save — a shell redirect, or vim with
+`backupcopy=yes` — carries no rename and appears as an `open` whose flags say
+`O_WRONLY|O_TRUNC`. Everything else an editor does goes through the temp-file
+rename, which is why that one is `write` rather than `move`: by the time the
+draft is posted the caller is long gone, and the rename is the last moment
+their identity is still knowable.
 
 ### Failure modes worth knowing
 
