@@ -15,10 +15,12 @@ import logging
 import os
 import sys
 
+import anyio
 import pyfuse3
 import trio
 
 from fswiki_core.client import Client, PostgrestError
+from .audit import AuditLog
 from .fs import FswikiFs
 
 log = logging.getLogger("fswiki")
@@ -54,9 +56,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--read-only", action="store_true", help="refuse all writes")
     ap.add_argument(
         "--audit", action="store_true",
-        help="identify the process behind every open from /proc. Costs "
-             "microseconds against the round trip open() already makes, but it "
-             "records what you do on your own machine, so it is opt-in",
+        help="identify the process behind every open from /proc and report it "
+             "to the server. Costs microseconds against the round trip open() "
+             "already makes, but it records what you do on your own machine, "
+             "so it is opt-in",
+    )
+    ap.add_argument(
+        "--audit-dir",
+        default=os.environ.get("FSWIKI_AUDIT_DIR",
+                               os.path.expanduser("~/.local/state/fswiki")),
+        help="where the audit queue is spooled while offline (default: %(default)s)",
+    )
+    ap.add_argument(
+        "--audit-interval", type=float, default=30.0,
+        help="seconds between attempts to ship the queue (default: %(default)s)",
     )
     ap.add_argument("--allow-other", action="store_true",
                     help="let other users see the mount; needs user_allow_other in fuse.conf")
@@ -84,13 +97,21 @@ async def run(args: argparse.Namespace) -> int:
                 return 1
             log.warning("no token: mounting read-only, and anonymous sees nothing")
 
+        audit = None
+        if args.audit:
+            if principal is None:
+                log.error("--audit needs a token: events are filed against a "
+                          "principal, and anonymous is not one")
+                return 1
+            audit = AuditLog(client, args.audit_dir, interval=args.audit_interval)
+
         fs = FswikiFs(
             client,
             principal,
             ttl=args.ttl,
             poll=args.poll,
             read_only=args.read_only or principal is None,
-            audit=args.audit,
+            audit=audit,
         )
         try:
             tree = await fs.refresh(force=True)
@@ -109,9 +130,22 @@ async def run(args: argparse.Namespace) -> int:
 
         pyfuse3.init(fs, args.mountpoint, options)
         try:
-            await pyfuse3.main()
+            async with anyio.create_task_group() as tg:
+                if audit is not None:
+                    # Ships in the background; recording never waits on it.
+                    tg.start_soon(audit.run)
+                await pyfuse3.main()
+                tg.cancel_scope.cancel()
         finally:
             pyfuse3.close(unmount=True)
+            if audit is not None:
+                # One last attempt, so unmounting does not strand a queue that
+                # would otherwise sit there until the next mount.
+                with anyio.CancelScope(shield=True), anyio.move_on_after(5):
+                    try:
+                        await audit.flush()
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning("could not flush the audit queue: %s", exc)
         return 0
     finally:
         await client.aclose()

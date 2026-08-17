@@ -183,20 +183,54 @@ Two things to get right before this goes anywhere near production:
   `postgres_fdw` foreign server plus a user mapping keeps the connection string
   out of a routine anyone can read with `\df+`.
 
-### Still worth a client-side queue
+### What is actually built
 
-The header covers opens that reach the network. It does not cover a content
-cache hit, and it does not cover being offline — so the durable local queue
-below is still the at-least-once path, with the header as the zero-round-trip
-fast path for everything online. The design that follows:
+The header trick is real and measured, but it is not what ships events today,
+and the reason is the security note above: making it safe needs a dedicated
+`postgres_fdw` server, a user mapping, and an insert-only role, and getting any
+of that wrong puts an attacker-supplied header next to a privileged connection.
+The queue below has none of that exposure and covers the cases the header
+cannot — a content-cache hit that never reaches the network, and a laptop that
+is offline. The header remains the obvious optimisation once the audit path
+earns the extra machinery.
 
-1. `open()` captures inline and appends to an in-memory buffer. Never blocks on
-   disk or network.
-2. A writer task appends JSONL to `$FSWIKI_STATE/audit.jsonl`, mode 0600. No
-   fsync per event; batch it.
-3. A shipper task batch-POSTs to an RPC and advances an offset on success.
-4. Every record carries a client-generated event id, and the server table is
-   insert-only with `unique (event_id)` and `on conflict do nothing`, so
-   at-least-once delivery is safe.
-5. The on-disk queue is size-capped. When it drops records it writes a marker
-   saying how many, so a gap is visible rather than silent.
+What exists:
+
+* `wiki.access_event` — insert-only for `fswiki_user`, RLS so you see only your
+  own trail. No update or delete grant at all: a trail its subject can rewrite
+  is not one. The principal comes from the token, never from the payload.
+* `wiki.record_opens(jsonb)` — one round trip per batch, idempotent on the
+  client-generated `event_id`, so a resend returns 0 rather than duplicating.
+* `fswiki_fuse.audit.AuditLog` — the client queue described below.
+
+### The queue
+
+1. `open()` captures inline and appends one JSON line to `audit.jsonl`, mode
+   0600, under `--audit-dir`. No fsync per event, no network, no lock.
+2. A background task ships it, every `--audit-interval` seconds and once more on
+   unmount.
+3. **Rotation, not truncation.** The live file is renamed to `audit.sending.jsonl`
+   before anything is read from it, so events arriving mid-flight land in a fresh
+   file and cannot be dropped by a truncate decided before they existed. A batch
+   that fails to ship stays under its rotated name and is retried ahead of
+   anything newer, which also keeps the order.
+4. Delivery is at-least-once. Losing an acknowledgement is common; losing an
+   event is not acceptable. `record_opens` dedupes on `event_id`.
+5. The queue is size-capped (8 MB). When it drops events it counts them and says
+   so in the log, and says so again when the queue drains — a gap nobody can see
+   is indistinguishable from nothing having happened.
+
+Recorded at `open()`, after the entry resolves and *before* the permission
+checks, so a refused open is recorded too: an attempt on something you may not
+have is the more interesting half of an access log. Scratch files never leave
+the process and are never recorded.
+
+### Failure modes worth knowing
+
+* A full or read-only disk logs a warning and drops the event. It never fails
+  the `open()`.
+* A torn last line — the process was killed mid-write — is skipped, and the rest
+  of its batch still ships.
+* `--audit` without a token is refused at startup rather than silently
+  collecting events that can never be filed: events belong to a principal, and
+  anonymous is not one.

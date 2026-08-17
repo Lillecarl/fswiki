@@ -42,6 +42,8 @@ python3Packages.buildPythonApplication {
     "fswiki_fuse"
     "fswiki_fuse.fs"
     "fswiki_fuse.model"
+    "fswiki_fuse.audit"
+    "fswiki_fuse.procinfo"
   ];
 
   # The suite needs a live PostgREST; see fuse/test/run.sh.

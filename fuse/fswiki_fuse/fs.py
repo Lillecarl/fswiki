@@ -33,6 +33,7 @@ import pyfuse3
 from fswiki_core import naming
 from fswiki_core.client import Client, PostgrestError
 from . import procinfo
+from .audit import AuditLog
 from .inodes import ROOT_INODE, InodeTable
 from .model import Node, Tree, build
 
@@ -79,7 +80,7 @@ class FswikiFs(pyfuse3.Operations):
         ttl: float = 5.0,
         poll: float | None = None,
         read_only: bool = False,
-        audit: bool = False,
+        audit: "AuditLog | None" = None,
     ) -> None:
         super().__init__()
         self._client = client
@@ -364,6 +365,15 @@ class FswikiFs(pyfuse3.Operations):
         entry = self._resolve(inode)
         if entry is None:
             raise pyfuse3.FUSEError(errno.ENOENT)
+
+        # After the entry resolves, so the record names a document rather than
+        # an inode, and before any of the checks below, so a refused open is
+        # recorded too — an attempt on something you may not have is the more
+        # interesting half of an access log. Scratch files are local-only and
+        # never leave this process, so they are nobody's business.
+        if self._audit is not None and isinstance(entry, Node):
+            self._audit.record(document_id=entry.document_id, path=entry.path,
+                               open_flags=flags, process=who)
         if isinstance(entry, Node) and entry.is_folder:
             raise pyfuse3.FUSEError(errno.EISDIR)
         if isinstance(entry, Scratch) and entry.is_dir:
@@ -914,6 +924,15 @@ class FswikiFs(pyfuse3.Operations):
             values["state"] = "synthetic (implied by a draft below it)"
         if entry.draft:
             values["draft_operation"] = entry.draft["operation"]
+            # A conflicted draft looks like any other file — the markers are in
+            # the text and nothing else says so. Saying it here is the only way
+            # the mount can tell you, short of inventing a filename convention.
+            if entry.draft.get("state") == "conflicted":
+                values["state"] = (
+                    f"conflicted (merged with revision "
+                    f"{entry.draft.get('merged_from')}; resolve the markers, "
+                    f"or run: fswiki merge --abort)"
+                )
         return values
 
     async def listxattr(self, inode, ctx):
