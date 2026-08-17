@@ -20,7 +20,7 @@ python3Packages.buildPythonApplication {
     python3Packages.anyio
   ] ++ fswiki-core.optional-dependencies.render;
 
-  pythonImportsCheck = [ "fswiki_cli" "fswiki_cli.report" "fswiki_cli.paths" ];
+  pythonImportsCheck = [ "fswiki_cli" "fswiki_cli.report" "fswiki_cli.paths" "fswiki_cli.preview" ];
 
   meta = {
     description = "Publish fswiki drafts";

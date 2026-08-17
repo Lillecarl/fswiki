@@ -4,6 +4,7 @@
     fswiki diff                   what would change
     fswiki push -m "message"      publish all of it
     fswiki revert                 throw a draft away
+    fswiki preview                read it in a browser while you write
     fswiki push -m "..." a/b.md   publish a subset
 
 Push is all or nothing, the way `svn commit` is. If anything conflicts, nothing
@@ -22,7 +23,7 @@ import anyio
 from fswiki_core import merge, render
 from fswiki_core.client import Client, PostgrestError
 
-from . import paths, report
+from . import paths, preview, report
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -61,6 +62,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                           help="print the registered backends and stop")
     p_render.add_argument("--raw", action="store_true",
                           help="leave wiki links unresolved, as they are cached")
+
+    p_preview = sub.add_parser(
+        "preview", help="serve the wiki as HTML, for looking at while you write")
+    p_preview.add_argument("--host", default="127.0.0.1",
+                           help="address to bind (default: %(default)s). Anything "
+                                "else exposes your view of the wiki to whoever "
+                                "reaches the port")
+    p_preview.add_argument("--port", type=int, default=8222,
+                           help="port to bind (default: %(default)s)")
+    p_preview.add_argument("--backend", help="which render backend to use")
+    p_preview.add_argument("--published", action="store_true",
+                           help="ignore your drafts and show what is published")
 
     p_revert = sub.add_parser(
         "revert",
@@ -107,6 +120,11 @@ async def run(args: argparse.Namespace) -> int:
 
         if args.command == "render":
             return await _render(client, drafts, args)
+
+        if args.command == "preview":
+            return await preview.serve(client, host=args.host, port=args.port,
+                                       backend=args.backend,
+                                       drafts=not args.published)
 
         if args.command == "status":
             print(report.render_status(drafts))

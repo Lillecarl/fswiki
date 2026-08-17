@@ -15,6 +15,7 @@ into published revisions.
     fswiki revert                    # what withdrawing your drafts would cost
     fswiki revert --apply a/b.md     # withdraw one
     fswiki render a/b.md             # HTML on stdout
+    fswiki preview                   # read it in a browser while you write
 
 It depends on `fswiki-core`, not on the FUSE client, so publishing from a server
 or a CI job does not require the ability to mount anything.
@@ -203,6 +204,45 @@ reserved `/-/fswiki/` prefix, unresolved, because which of them are live is a
 property of the reader rather than of the revision. See
 [docs/rendering.md](../docs/rendering.md).
 
+## Preview
+
+    $ fswiki preview
+    fswiki preview on http://127.0.0.1:8222/
+      read-only; ctrl-c to stop
+
+The same pipeline `render` uses, with a shell around it and a URL per page. It
+shows your drafts by default — that is what makes it a preview rather than a
+view — and `--published` ignores them. It reloads when the wiki changes, by
+polling the same eleven-byte change token the mount polls.
+
+**Read-only by construction, not by convention.** Every method other than GET
+and HEAD is refused before the request is routed at all, so the property does
+not depend on which routes exist today or on nobody adding a form later:
+
+    $ curl -X POST -i http://127.0.0.1:8222/public/welcome
+    HTTP/1.1 405 Method Not Allowed
+    Allow: GET, HEAD
+
+That is a narrower claim than "safe to expose". `--host 0.0.0.0` binds it to
+every interface, which is useful on a remote workstation and worth being clear
+about: the server holds *your* token and answers as you, so anyone who reaches
+the port reads everything you can read, with no login. It says so at startup
+rather than assuming you meant it.
+
+    $ fswiki preview --host 0.0.0.0 --port 4321
+    fswiki preview on http://hetztop:4321/
+      listening on 0.0.0.0: anyone who can reach this port reads everything
+      your token can read, with no login.
+      read-only; ctrl-c to stop
+
+An SSH tunnel does the same job without opening a port:
+
+    ssh -L 8222:127.0.0.1:8222 workstation
+
+`http.server` is blocking and the client is async, so the HTTP server runs in a
+worker thread and reaches the event loop through an anyio portal — one client,
+one connection pool, no second HTTP stack.
+
 ## Known gaps
 
 - `diff` fetches the published body of every selected draft, one request each.
@@ -212,8 +252,11 @@ property of the reader rather than of the revision. See
   so the answer is a different name — and it says so rather than guessing.
 - `merge --abort` backs out the text, not a `delete`d or `move`d draft's other
   fields. Those operations carry no content to merge, so nothing rewrites them.
-- `preview` — a local server that watches the mount and reloads — does not
-  exist yet. `render` is its inner loop.
+- `preview` reloads by polling the change token, so someone else's edit takes
+  up to two seconds to appear and your own draft takes as long as the mount's
+  own poll. Fine for writing; not a live-typing preview.
+- `preview` has no search, no history and no ACL view. It is for reading what
+  you are writing.
 - No `acl` verbs. `wiki.explain_acl()` is the intended backend and returns the
   ACL in the order it is consulted, including the two rules that skip it — a
   superuser, and an owner's standing `grant`.
