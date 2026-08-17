@@ -39,6 +39,8 @@ class Node:
 
     document_id: str | None = None
     version: int | None = None
+    # Who published `version`. Only used to recognise our own revisions.
+    version_author_id: str | None = None
     size: int = 0
     mtime: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     capabilities: frozenset[str] = frozenset()
@@ -111,6 +113,7 @@ def build(manifest: list[dict], drafts: list[dict]) -> Tree:
             is_folder=row["is_folder"],
             content_type=row.get("content_type") or naming.DEFAULT_CONTENT_TYPE,
             version=row.get("version"),
+            version_author_id=row.get("version_author_id"),
             size=row.get("size") or 0,
             mtime=_parse_time(row.get("version_created_at") or row.get("updated_at")),
             capabilities=frozenset(row.get("capabilities") or ()),

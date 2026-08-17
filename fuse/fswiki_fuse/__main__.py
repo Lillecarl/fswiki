@@ -52,6 +52,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
              "only when the token moves (default: %(default)s)",
     )
     ap.add_argument("--read-only", action="store_true", help="refuse all writes")
+    ap.add_argument(
+        "--audit", action="store_true",
+        help="identify the process behind every open from /proc. Costs "
+             "microseconds against the round trip open() already makes, but it "
+             "records what you do on your own machine, so it is opt-in",
+    )
     ap.add_argument("--allow-other", action="store_true",
                     help="let other users see the mount; needs user_allow_other in fuse.conf")
     ap.add_argument("--debug", action="store_true", help="log every operation")
@@ -84,6 +90,7 @@ async def run(args: argparse.Namespace) -> int:
             ttl=args.ttl,
             poll=args.poll,
             read_only=args.read_only or principal is None,
+            audit=args.audit,
         )
         try:
             tree = await fs.refresh(force=True)

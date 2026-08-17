@@ -46,6 +46,34 @@ CLI.
     $ rm ~/wiki/engineering/old.md                   # a 'delete' draft
     $ mv ~/wiki/a/x.md ~/wiki/b/x.md                 # a 'move' draft
 
+### What an edit is based on
+
+Every `update` draft carries a `base_version`, and push refuses the whole
+changeset if the server has moved past it. That check is only worth anything if
+the number is the revision you actually read, so the mount records it when
+content leaves us — at `open()`, before the bytes go out — and not at save time.
+
+Taking it from the tree at save time is a silent lost update. Open a file at
+revision 3, someone publishes revision 4, the mount polls and refreshes, you
+save: the tree says 4, the draft would claim 4, push would accept it, and
+revision 4 would be gone with nobody told. The conflict machinery never runs,
+because it was lied to about what was edited.
+
+Three details make it hold up against real editors:
+
+- **A truncating open records nothing.** `O_TRUNC` hands the caller no content,
+  so it cannot have shown them a newer revision — and it is exactly what an
+  in-place save looks like. Recording there would re-base the edit onto whatever
+  the poller last pulled in.
+- **The record outlives the file handle.** An atomic save writes a scratch file
+  and renames it over the target, so by the time the draft is written the handle
+  that read the original is long gone.
+- **Your own push is not a conflict.** The CLI publishes out-of-band, so the
+  mount only learns of it from the manifest. The tip's author separates the
+  cases exactly: if you published it, your copy *is* that revision. Saves
+  therefore bypass the poll window before deciding, which costs one
+  `change_token()` — eleven bytes — unless the wiki has actually moved.
+
 ### Scratch files
 
 A name the server cannot hold as a slug — `.foo.md.swp`, `bar.md~`, `#notes#` —

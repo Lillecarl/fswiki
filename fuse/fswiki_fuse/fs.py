@@ -32,6 +32,7 @@ import pyfuse3
 
 from fswiki_core import naming
 from fswiki_core.client import Client, PostgrestError
+from . import procinfo
 from .inodes import ROOT_INODE, InodeTable
 from .model import Node, Tree, build
 
@@ -78,10 +79,15 @@ class FswikiFs(pyfuse3.Operations):
         ttl: float = 5.0,
         poll: float | None = None,
         read_only: bool = False,
+        audit: bool = False,
     ) -> None:
         super().__init__()
         self._client = client
         self._principal_id = principal_id
+        # Off unless asked for. Identifying the caller costs microseconds, but
+        # it is still a record of what someone did on their own machine, and
+        # that should be a decision rather than a default.
+        self._audit = audit
         # What the kernel is told it may cache for.
         self._ttl = ttl
         # How often we are willing to ask the server anything at all. Defaults
@@ -97,6 +103,10 @@ class FswikiFs(pyfuse3.Operations):
         self._token: str | None = None
         self._token_supported = True
         self._refresh_lock = anyio.Lock()
+
+        # document key -> the revision we last showed this user. One integer per
+        # document ever opened, same bound as the content cache below.
+        self._checked_out: dict[str, int] = {}
 
         self._scratch: dict[str, Scratch] = {}
         self._scratch_seq = 0
@@ -343,6 +353,13 @@ class FswikiFs(pyfuse3.Operations):
     # ------------------------------------------------------------------
 
     async def open(self, inode, flags, ctx):
+        # ctx.pid is the only place a caller's identity is ever visible: read()
+        # and write() carry a file handle and nothing else, so if we want to
+        # know who is holding a file it has to be captured here, now, while the
+        # caller is still blocked in the syscall and its pid cannot be reused.
+        who = procinfo.describe(ctx.pid) if self._audit else None
+        log.debug("open inode=%d flags=%#x uid=%d %s",
+                  inode, flags, ctx.uid, procinfo.summarise(who))
         await self._current()
         entry = self._resolve(inode)
         if entry is None:
@@ -357,6 +374,20 @@ class FswikiFs(pyfuse3.Operations):
             raise pyfuse3.FUSEError(errno.EROFS)
         if writing and isinstance(entry, Node) and not entry.writable:
             raise pyfuse3.FUSEError(errno.EACCES)
+
+        # Before the content leaves us, not after: this is the revision the user
+        # is about to base their edit on, whatever the tree says by the time they
+        # save. It survives close/reopen deliberately, because an atomic save
+        # writes a scratch file and renames it over the target — by then the
+        # handle that read the original is long gone.
+        #
+        # O_TRUNC is the exception, and it is the whole point. A truncating open
+        # hands the caller nothing, so it cannot have shown them a newer
+        # revision — and it is exactly what an in-place editor save looks like.
+        # Recording here would quietly re-base the edit onto whatever the poller
+        # last pulled in, which is the lost update we are trying to prevent.
+        if isinstance(entry, Node) and not flags & os.O_TRUNC:
+            self._record_checkout(entry)
 
         data = bytearray(await self._load(entry))
         if flags & os.O_TRUNC:
@@ -476,6 +507,65 @@ class FswikiFs(pyfuse3.Operations):
 
         await self._write_draft(node, bytes(handle.data))
 
+    def _record_checkout(self, node: Node) -> None:
+        """Remember which revision the user was shown for this document.
+
+        Called wherever content is handed out. This is the value a later edit is
+        based on, and it is emphatically *not* whatever the tree happens to say
+        at save time — see _base_version_for().
+        """
+        draft_base = (node.draft or {}).get("base_version")
+        if draft_base is not None:
+            # Their draft descends from the revision it was first based on, not
+            # from anything published since.
+            self._checked_out[node.key] = draft_base
+        elif node.version is not None:
+            self._checked_out[node.key] = node.version
+
+    def _base_version_for(self, node: Node) -> int | None:
+        """The revision an edit to this node is actually based on.
+
+        Reading it from the *current* tree is a silent lost update, and it is
+        worth spelling out why. Open a file at revision 3; someone else
+        publishes revision 4; the mount polls and refreshes; you save. The tree
+        now says 4, so recording node.version would claim the edit was based on
+        4 — push would accept it and revision 4 would be destroyed without
+        anyone being told. The conflict machinery never runs, because we lied to
+        it about what was edited.
+
+        Precedence, strongest first:
+
+        1. an existing draft's base_version — the content descends from it, and
+           it must not drift as other people publish;
+        2. the revision we last handed to this user, unless we have since
+           published past it ourselves (see below);
+        3. the tree's current revision, for a blind overwrite of a document the
+           user never read. Fail-safe: at worst this is stale and produces a
+           conflict, which is the direction to be wrong in.
+
+        The exception in (2) is what keeps edit-push-edit from conflicting with
+        itself. Push runs in the CLI, so the mount only learns about it from the
+        manifest, and an in-place editor save truncates rather than re-reads —
+        nothing would ever correct the remembered number. The tip's author
+        separates the two cases exactly: if we published it, our copy of the
+        file *is* that revision and the record can move on; if anyone else did,
+        their revision is still something we have to be told about.
+        """
+        draft_base = (node.draft or {}).get("base_version")
+        if draft_base is not None:
+            return draft_base
+        recorded = self._checked_out.get(node.key)
+        if recorded is None:
+            return node.version
+        if (
+            node.version is not None
+            and node.version > recorded
+            and node.version_author_id is not None
+            and node.version_author_id == self._principal_id
+        ):
+            return node.version
+        return recorded
+
     async def _write_draft(self, node: Node, data: bytes) -> None:
         """Record the buffer as this author's draft for the node's path."""
         if self._read_only or self._principal_id is None:
@@ -486,7 +576,18 @@ class FswikiFs(pyfuse3.Operations):
         if node.document_id is None:
             operation, base_version = "create", None
         elif node.published:
-            operation, base_version = "update", node.version
+            # Bypass the poll window before deciding the base. Everything below
+            # reads the tip out of the tree, and a tree up to `poll` seconds old
+            # gets that wrong in both directions: it can miss our own push and
+            # invent a conflict, and it is the stale number an unread blind
+            # overwrite would otherwise claim to descend from. Saves are rare
+            # next to reads, and the check is eleven bytes unless the wiki has
+            # actually moved.
+            self._checked_at = float("-inf")
+            fresh = (await self._current()).get(node.key)
+            if fresh is not None:
+                node = fresh
+            operation, base_version = "update", self._base_version_for(node)
         else:
             # A document row with no revision at all. wiki.draft's shape check
             # demands a base_version for 'update', and publish_revision demands
