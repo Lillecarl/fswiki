@@ -119,16 +119,32 @@ class Client:
         )
         return self._rows(r)
 
-    async def content(self, document_id: str) -> bytes:
+    async def content(self, document_id: str, *, event: dict | None = None) -> bytes:
         """The published body of one document.
 
         Through `syncable_document`, so a document that is readable but not
         syncable comes back as no rows rather than as content.
+
+        With `event`, the same read goes over `POST /rpc/read_document`, which
+        records the access in the transaction that serves the bytes. The verb
+        is the point: PostgREST runs GET in a read-only transaction, so a GET
+        cannot write its own audit row, and POST can. Visibility is identical —
+        the function is SECURITY INVOKER over the same view — so this is the
+        same read, witnessed.
+
+        Without `event` it stays a GET, which is cacheable and idempotent and
+        the right thing when nobody is auditing.
         """
-        r = await self._http.get(
-            "/syncable_document",
-            params={"select": "content", "id": f"eq.{document_id}"},
-        )
+        if event is not None:
+            r = await self._http.post(
+                "/rpc/read_document",
+                json={"p_document": document_id, "p_event": event},
+            )
+        else:
+            r = await self._http.get(
+                "/syncable_document",
+                params={"select": "content", "id": f"eq.{document_id}"},
+            )
         rows = self._rows(r)
         if not rows:
             raise LookupError(f"document {document_id} is not syncable, or is gone")
