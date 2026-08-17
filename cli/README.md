@@ -14,6 +14,7 @@ into published revisions.
     fswiki push -n -m "..."          # dry run
     fswiki revert                    # what withdrawing your drafts would cost
     fswiki revert --apply a/b.md     # withdraw one
+    fswiki render a/b.md             # HTML on stdout
 
 It depends on `fswiki-core`, not on the FUSE client, so publishing from a server
 or a CI job does not require the ability to mount anything.
@@ -160,6 +161,48 @@ says so instead of quoting a number.
 A draft in the middle of a merge is flagged, because `merge --abort` will put
 that one back and revert will not.
 
+## Rendering
+
+    $ fswiki render public/guide/permissions.md
+    <h1>How permissions work</h1>
+    ...
+
+Markup to HTML on stdout, so it pipes. `--draft` renders your unpublished
+version instead of the published one.
+
+**Which engine is a choice, not a given.** Backends register themselves if
+their library is installed, and are picked by the document's `content_type`:
+
+    $ fswiki render --list-backends
+      markdown-it-py   4.2.0      text/markdown
+      mistune          3.3.3      text/markdown
+      plain            1          text/plain
+
+`--backend` names one for a single run; `$FSWIKI_RENDERER` pins one for a
+deployment. What is *not* pluggable is anything that decides what a reader's
+browser gets: sanitising and wiki-link resolution happen on either side of the
+backend, in `fswiki_core.render`, so they cannot vary with the engine somebody
+installed.
+
+### Links you may not follow are not links
+
+A wikilink to a document you cannot read renders as plain text, and as exactly
+the same plain text as a link to a document that does not exist:
+
+    Visible: <a href="/public/welcome">public/welcome</a>
+    Hidden: The Plans
+    Absent: Nothing Here
+
+A live link would disclose that the target exists, where it lives and what it
+is called, none of which the ACL granted — and it would disclose them in the
+HTML, before any click could be audited. Telling "forbidden" from "missing"
+*is* the disclosure, so the two are byte-identical.
+
+`--raw` prints what a shared cache would hold instead: links left under the
+reserved `/-/fswiki/` prefix, unresolved, because which of them are live is a
+property of the reader rather than of the revision. See
+[docs/rendering.md](../docs/rendering.md).
+
 ## Known gaps
 
 - `diff` fetches the published body of every selected draft, one request each.
@@ -169,6 +212,8 @@ that one back and revert will not.
   so the answer is a different name — and it says so rather than guessing.
 - `merge --abort` backs out the text, not a `delete`d or `move`d draft's other
   fields. Those operations carry no content to merge, so nothing rewrites them.
+- `preview` — a local server that watches the mount and reloads — does not
+  exist yet. `render` is its inner loop.
 - No `acl` verbs. `wiki.explain_acl()` is the intended backend and returns the
   ACL in the order it is consulted, including the two rules that skip it — a
   superuser, and an owner's standing `grant`.

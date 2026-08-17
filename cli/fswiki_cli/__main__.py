@@ -19,7 +19,7 @@ import sys
 
 import anyio
 
-from fswiki_core import merge
+from fswiki_core import merge, render
 from fswiki_core.client import Client, PostgrestError
 
 from . import paths, report
@@ -51,6 +51,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p_merge.add_argument("--abort", action="store_true",
                          help="restore the drafts as they were before merging")
 
+    p_render = sub.add_parser(
+        "render", help="render a document to HTML")
+    p_render.add_argument("path", nargs="?", help="the document to render")
+    p_render.add_argument("--backend", help="which render backend to use")
+    p_render.add_argument("--draft", action="store_true",
+                          help="render your draft rather than what is published")
+    p_render.add_argument("--list-backends", action="store_true",
+                          help="print the registered backends and stop")
+    p_render.add_argument("--raw", action="store_true",
+                          help="leave wiki links unresolved, as they are cached")
+
     p_revert = sub.add_parser(
         "revert",
         help="withdraw drafts, putting the files back to what is published")
@@ -69,6 +80,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 async def run(args: argparse.Namespace) -> int:
+    if args.command == "render" and args.list_backends:
+        for backend in render.available():
+            types = ", ".join(backend.content_types)
+            print(f"  {backend.name:<16} {backend.version:<10} {types}")
+        return 0
+
     client = Client(args.url, args.token)
     try:
         try:
@@ -87,6 +104,9 @@ async def run(args: argparse.Namespace) -> int:
             return 0
 
         drafts = await client.drafts()
+
+        if args.command == "render":
+            return await _render(client, drafts, args)
 
         if args.command == "status":
             print(report.render_status(drafts))
@@ -247,6 +267,69 @@ async def _abort_merge(client: Client, drafts: list[dict]) -> int:
 
     print("\n" + report.dim("Your drafts are as they were before the merge. "
                             "Published history was never involved."))
+    return 0
+
+
+async def _render(client: Client, drafts: list[dict],
+                  args: argparse.Namespace) -> int:
+    """One document to HTML on stdout.
+
+    The composable half of previewing, and the previewer's own inner loop. It
+    prints to stdout so it can be tested by a shell script like everything
+    else here, and piped into a browser by anyone who has not waited for
+    `fswiki preview`.
+    """
+    if not args.path:
+        print("fswiki: render needs a path (or --list-backends)", file=sys.stderr)
+        return 1
+    try:
+        path = paths.resolve(args.path)
+    except paths.PathError as exc:
+        print(f"fswiki: {exc}", file=sys.stderr)
+        return 1
+
+    draft = next((d for d in drafts if d["path"] == path), None)
+    content_type = "text/markdown"
+
+    if args.draft or (draft is not None and draft.get("content") is not None):
+        if draft is None or draft.get("content") is None:
+            print(f"fswiki: no draft of yours at {paths.to_display(path)}",
+                  file=sys.stderr)
+            return 1
+        text = draft["content"]
+        content_type = draft.get("content_type") or content_type
+    else:
+        row = await client.document(path)
+        if row is None:
+            print(f"fswiki: no document at {paths.to_display(path)}",
+                  file=sys.stderr)
+            return 1
+        text = row.get("content") or ""
+        content_type = row.get("content_type") or content_type
+
+    try:
+        page = render.render(text, content_type=content_type,
+                             backend=args.backend)
+    except render.UnknownBackend as exc:
+        print(f"fswiki: {exc}", file=sys.stderr)
+        return 1
+    except render.safety.SanitiserUnavailable as exc:
+        print(f"fswiki: {exc}", file=sys.stderr)
+        return 1
+
+    if args.raw:
+        # What a shared cache would hold: links unresolved, because which of
+        # them are live is a property of the reader and not of the revision.
+        print(page.html, end="")
+        return 0
+
+    # Resolved against this caller. A document absent from the manifest is
+    # indistinguishable here from one they may not read, which is the point.
+    visible = {d["path"] for d in await client.manifest()}
+    print(render.links.resolve(
+        page.html,
+        lambda target: f"/{paths.to_display(target)}" if target in visible else None,
+    ), end="")
     return 0
 
 
