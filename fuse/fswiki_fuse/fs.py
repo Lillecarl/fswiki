@@ -68,6 +68,23 @@ class Handle:
     dirty: bool = False
 
 
+@dataclass
+class _Carrier:
+    """An audit event offered to a content fetch, and whether it took it.
+
+    An event has two ways to reach the server. The fetch can carry it, which
+    costs nothing and commits it alongside the bytes it describes; failing
+    that, the local queue ships it later. Exactly one of them should, so this
+    passes the event down to whoever might carry it and reports back whether
+    anyone did. The alternative — threading a second return value through
+    `_load` and everything it can raise past — loses the answer on precisely
+    the paths where it matters most.
+    """
+
+    event: dict | None
+    taken: bool = False
+
+
 class FswikiFs(pyfuse3.Operations):
     supports_dot_lookup = True
     enable_writeback_cache = False
@@ -358,7 +375,7 @@ class FswikiFs(pyfuse3.Operations):
         # and write() carry a file handle and nothing else, so if we want to
         # know who is holding a file it has to be captured here, now, while the
         # caller is still blocked in the syscall and its pid cannot be reused.
-        who = procinfo.describe(ctx.pid) if self._audit else None
+        who = self._who(ctx)
         log.debug("open inode=%d flags=%#x uid=%d %s",
                   inode, flags, ctx.uid, procinfo.summarise(who))
         await self._current()
@@ -366,14 +383,30 @@ class FswikiFs(pyfuse3.Operations):
         if entry is None:
             raise pyfuse3.FUSEError(errno.ENOENT)
 
-        # After the entry resolves, so the record names a document rather than
-        # an inode, and before any of the checks below, so a refused open is
-        # recorded too — an attempt on something you may not have is the more
-        # interesting half of an access log. Scratch files are local-only and
-        # never leave this process, so they are nobody's business.
+        # Minted after the entry resolves, so the record names a document
+        # rather than an inode, and before any of the checks below, so a
+        # refused open is recorded too — an attempt on something you may not
+        # have is the more interesting half of an access log. Scratch files are
+        # local-only and never leave this process, so they are nobody's
+        # business.
+        #
+        # Not queued yet: if this open goes on to fetch a body, the fetch
+        # carries the event and the server records it itself. The `finally`
+        # below spools it only if that did not happen, which covers every path
+        # out of here including the refusals.
+        event = None
         if self._audit is not None and isinstance(entry, Node):
-            self._audit.record(document_id=entry.document_id, path=entry.path,
-                               open_flags=flags, process=who)
+            event = self._audit.event(document_id=entry.document_id,
+                                      path=entry.path, open_flags=flags,
+                                      process=who)
+        carried = _Carrier(event)
+        try:
+            return await self._open(entry, flags, carried)
+        finally:
+            if event is not None and not carried.taken:
+                self._audit.queue(event)
+
+    async def _open(self, entry, flags, carried: "_Carrier"):
         if isinstance(entry, Node) and entry.is_folder:
             raise pyfuse3.FUSEError(errno.EISDIR)
         if isinstance(entry, Scratch) and entry.is_dir:
@@ -399,9 +432,13 @@ class FswikiFs(pyfuse3.Operations):
         if isinstance(entry, Node) and not flags & os.O_TRUNC:
             self._record_checkout(entry)
 
-        data = bytearray(await self._load(entry))
+        # A truncating open is handed nothing, so there is nothing to fetch.
+        # Loading and then discarding cost a round trip on every editor save,
+        # and would have logged a read of bytes the caller never saw.
         if flags & os.O_TRUNC:
             data = bytearray()
+        else:
+            data = bytearray(await self._load(entry, carried))
 
         fh = self._next_handle()
         self._handles[fh] = Handle(
@@ -418,7 +455,30 @@ class FswikiFs(pyfuse3.Operations):
             raise pyfuse3.FUSEError(errno.EBADF)
         return bytes(handle.data[off:off + size])
 
-    async def _load(self, entry: Node | Scratch) -> bytes:
+    def _who(self, ctx) -> dict | None:
+        """Identify the caller, if anyone is auditing."""
+        if self._audit is None:
+            return None
+        return procinfo.describe(ctx.pid,
+                                 full_cmdline=self._audit.full_cmdline)
+
+    def _note(self, ctx, action: str, entry_or_path, document_id=None) -> None:
+        """Record a mutation. Nothing carries these, so they go to the queue.
+
+        `open` gets to ride along on the fetch that serves it; a create or a
+        delete has no such request to attach to — the draft write it does make
+        is a different transaction on a different table, and threading an audit
+        event through `put_draft` would put the trail's shape into the
+        publishing path for no gain.
+        """
+        if self._audit is None:
+            return
+        path = entry_or_path if isinstance(entry_or_path, str) else entry_or_path.path
+        self._audit.record(document_id=document_id, path=path, action=action,
+                           process=self._who(ctx))
+
+    async def _load(self, entry: Node | Scratch,
+                    carried: "_Carrier | None" = None) -> bytes:
         if isinstance(entry, Scratch):
             return bytes(entry.data)
 
@@ -432,15 +492,32 @@ class FswikiFs(pyfuse3.Operations):
         etag = f"v{entry.version}"
         cached = self._content.get(entry.key)
         if cached is not None and cached[0] == etag:
+            # Served from our own cache, so the server never hears about this
+            # read and cannot record it. The queue is the only route left, and
+            # this is the main reason it still exists once the fetch can carry
+            # an event by itself.
             return cached[1]
 
+        # The audit event, if there is one, travels on this request: the read
+        # and the record of it commit together, or neither does. `carried` is
+        # marked taken so the caller does not also spool it.
+        event = carried.event if carried is not None else None
         try:
-            data = await self._client.content(entry.document_id)
+            data = await self._client.content(entry.document_id, event=event)
         except LookupError:
+            # The call itself succeeded and returned no rows, which means the
+            # server ran the function and recorded the attempt. A read of
+            # something you may not have is exactly the event worth keeping.
+            if carried is not None:
+                carried.taken = True
             raise pyfuse3.FUSEError(errno.ENOENT) from None
         except PostgrestError as exc:
+            # Nothing committed, so the event did not land either and must go
+            # to the queue. Leaving `taken` false is what arranges that.
             log.error("fetching %s: %s", entry.path, exc)
             raise pyfuse3.FUSEError(errno.EIO) from exc
+        if carried is not None:
+            carried.taken = True
 
         self._content[entry.key] = (etag, data)
         return data
@@ -674,6 +751,12 @@ class FswikiFs(pyfuse3.Operations):
         slug, content_type = parsed
         path = f"{parent_path}.{slug}"
 
+        # Before the draft is written, on the same principle as open(): a
+        # refused create is worth more than a successful one. There is no
+        # document_id yet — that is what a create means — so the path carries
+        # the identity.
+        self._note(ctx, "create", path)
+
         try:
             await self._client.put_draft(
                 author_id=self._principal_id,
@@ -742,6 +825,11 @@ class FswikiFs(pyfuse3.Operations):
 
         if entry.is_folder:
             raise pyfuse3.FUSEError(errno.EISDIR)
+
+        # Scratch files are gone by here, so this is a real document: either a
+        # draft being withdrawn or a published page being retired. Recorded
+        # ahead of the capability check, so a refused delete leaves a mark too.
+        self._note(ctx, "delete", entry, entry.document_id)
 
         # An unpublished draft is withdrawn outright; a published document gets
         # a delete draft, which push turns into a tombstone.
@@ -843,9 +931,16 @@ class FswikiFs(pyfuse3.Operations):
             target_node = tree.get(tree.by_path.get(target_path, ""))
             data = bytes(source.data)
             if target_node is not None and target_node.document_id and target_node.published:
+                # The most consequential event the mount can record. write()
+                # carries no caller, so this rename is the last point at which
+                # "who is editing this" is still knowable.
+                self._note(ctx, "write", target_path, target_node.document_id)
                 await self._write_draft(target_node, data)
                 new_key = target_node.key
             else:
+                # Same rename, but nothing is published there: the save is
+                # bringing a document into existence rather than editing one.
+                self._note(ctx, "create", target_path)
                 await self._create_draft(target_path, content_type, data)
                 new_key = f"draft:{target_path}"
 
@@ -871,6 +966,11 @@ class FswikiFs(pyfuse3.Operations):
 
         if not source.published:
             raise pyfuse3.FUSEError(errno.EPERM)
+
+        # A real document changing path. Recorded against the destination,
+        # since that is what the ACL will be asked about.
+        self._note(ctx, "move", target_path, source.document_id)
+
         try:
             await self._client.put_draft(
                 author_id=self._principal_id,

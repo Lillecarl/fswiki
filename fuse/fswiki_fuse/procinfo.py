@@ -51,11 +51,21 @@ def _text(raw: bytes | None) -> str | None:
     return raw.decode("utf-8", errors="replace").strip() or None
 
 
-def describe(pid: int) -> dict | None:
+def describe(pid: int, *, full_cmdline: bool = False) -> dict | None:
     """A best-effort identity for `pid`, or None if it cannot be read.
 
     Returns only the fields that were actually available, so a caller in a
     foreign pid namespace degrades to a bare pid rather than to a lie.
+
+    **argv is truncated to argv[0] unless `full_cmdline`.** Command lines are
+    where people put secrets — `mysql -pSECRET`, `curl -H "Authorization: ..."`,
+    an API key passed to a one-off script — and none of it has anything to do
+    with the wiki. Shipping it would take secrets off the user's machine and
+    put them in someone else's database, and then in that database's backups,
+    which is a worse leak than the one an audit trail is meant to catch. The
+    program's identity is what the record is for, and argv[0] plus `exe` says
+    that. What was dropped is counted rather than silently omitted, so a reader
+    can tell a bare command from a truncated one.
     """
     if pid <= 0:
         # The kernel reports 0 for requests it raised itself — readahead,
@@ -68,11 +78,15 @@ def describe(pid: int) -> dict | None:
     cmdline = _read(f"{base}/cmdline", CMDLINE_LIMIT)
     if cmdline:
         # NUL-separated, usually with a trailing NUL.
-        info["cmdline"] = [
+        argv = [
             a.decode("utf-8", errors="replace")
             for a in cmdline.split(b"\0")
             if a
         ]
+        if argv:
+            info["cmdline"] = argv if full_cmdline else argv[:1]
+            if not full_cmdline and len(argv) > 1:
+                info["argv_elided"] = len(argv) - 1
 
     comm = _text(_read(f"{base}/comm", 64))
     if comm:
@@ -113,4 +127,7 @@ def summarise(info: dict | None) -> str:
         return "unknown"
     name = info.get("comm") or "?"
     argv = " ".join(info.get("cmdline") or ())
+    elided = info.get("argv_elided")
+    if elided:
+        argv = f"{argv} (+{elided} args)"
     return f"{name}[{info['pid']}] {argv}".rstrip()

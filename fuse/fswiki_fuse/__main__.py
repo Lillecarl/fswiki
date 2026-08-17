@@ -71,6 +71,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--audit-interval", type=float, default=30.0,
         help="seconds between attempts to ship the queue (default: %(default)s)",
     )
+    ap.add_argument(
+        "--audit-argv", action="store_true",
+        help="ship each caller's whole command line, not just the program "
+             "name. Command lines routinely contain passwords and API keys "
+             "that have nothing to do with the wiki, and this sends them to "
+             "the server and into its backups. Only worth it where the fleet "
+             "policy already says so",
+    )
     ap.add_argument("--allow-other", action="store_true",
                     help="let other users see the mount; needs user_allow_other in fuse.conf")
     ap.add_argument("--debug", action="store_true", help="log every operation")
@@ -103,7 +111,12 @@ async def run(args: argparse.Namespace) -> int:
                 log.error("--audit needs a token: events are filed against a "
                           "principal, and anonymous is not one")
                 return 1
-            audit = AuditLog(client, args.audit_dir, interval=args.audit_interval)
+            audit = AuditLog(client, args.audit_dir,
+                             interval=args.audit_interval,
+                             full_cmdline=args.audit_argv)
+            if args.audit_argv:
+                log.warning("--audit-argv: full command lines will be sent to "
+                            "the server, including any secrets in them")
 
         fs = FswikiFs(
             client,

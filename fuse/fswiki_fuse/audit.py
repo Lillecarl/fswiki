@@ -56,7 +56,12 @@ class AuditLog:
         *,
         interval: float = 30.0,
         cap_bytes: int = QUEUE_CAP_BYTES,
+        full_cmdline: bool = False,
     ) -> None:
+        # Whether the caller's whole argv is shipped or only argv[0]. Off,
+        # because command lines carry other people's secrets and none of them
+        # are the wiki's business. See procinfo.describe().
+        self.full_cmdline = full_cmdline
         self._client = client
         self._dir = Path(directory)
         self._live = self._dir / "audit.jsonl"
@@ -65,23 +70,40 @@ class AuditLog:
         self._cap = cap_bytes
 
         self._dropped = 0
-        self._size = 0
+        # Seeded from disk, not from zero. A queue that survived the last
+        # session still occupies the cap it was capped by; starting the count
+        # at zero would let every restart buy another 8 MB, which on a laptop
+        # that mounts twice a day is not a cap at all.
+        self._size = _size_of(self._live) + _size_of(self._sending)
 
     # ------------------------------------------------------------------
     # Recording
     # ------------------------------------------------------------------
 
-    def record(
-        self,
+    @staticmethod
+    def event(
         *,
         document_id: str | None,
         path: str | None,
         action: str = "open",
         open_flags: int | None = None,
         process: dict | None = None,
-    ) -> None:
-        """Queue one event. Never raises, never blocks on anything remote."""
-        event = {
+    ) -> dict:
+        """Mint one event. Does not queue it — see `queue()`.
+
+        Separate from queueing because an event has two ways to reach the
+        server and they are not alternatives. A content fetch can carry it on
+        the request that serves the bytes, which is durable and needs no queue
+        at all; but a refused open never fetches anything, a body already in a
+        draft is never fetched either, and a laptop on a train cannot fetch. So
+        the event is minted here, offered to the fetch, and queued only if the
+        fetch did not take it.
+
+        The id is generated here and used by both routes, so if they both
+        happen — a retry, a crash between the two — the server's `on conflict`
+        collapses them into one row.
+        """
+        return {
             "event_id": str(uuid.uuid4()),
             "document_id": document_id,
             "path": path,
@@ -90,6 +112,15 @@ class AuditLog:
             "occurred_at": datetime.now(timezone.utc).isoformat(),
             "process": process,
         }
+
+    def record(self, **fields) -> dict:
+        """Mint an event and queue it. The common case for anything but a read."""
+        event = self.event(**fields)
+        self.queue(event)
+        return event
+
+    def queue(self, event: dict) -> None:
+        """Spool one event locally. Never raises, never blocks on anything remote."""
         line = json.dumps(event, separators=(",", ":")) + "\n"
 
         if self._size + len(line) > self._cap:
@@ -122,11 +153,14 @@ class AuditLog:
     async def run(self) -> None:
         """Drain the queue forever. Intended for a nursery."""
         while True:
-            await anyio.sleep(self._interval)
+            # Flush first, then sleep. A queue left behind by a session that
+            # crashed or lost the network should not wait out an interval it
+            # has already waited out once.
             try:
                 await self.flush()
             except Exception as exc:  # noqa: BLE001 - a shipper must not die
                 log.warning("audit flush failed, will retry: %s", exc)
+            await anyio.sleep(self._interval)
 
     async def flush(self) -> None:
         """Send whatever is queued. Safe to call at any time."""
@@ -135,8 +169,9 @@ class AuditLog:
         if not self._sending.exists():
             if not self._live.exists() or self._live.stat().st_size == 0:
                 return
+            # The rename is what makes this race-free, and it moves bytes from
+            # one side of the cap to the other rather than freeing them.
             self._live.rename(self._sending)
-            self._size = 0
 
         raw = self._sending.read_text(encoding="utf-8", errors="replace")
         events, malformed = [], 0
@@ -154,6 +189,7 @@ class AuditLog:
 
         if not events:
             self._sending.unlink(missing_ok=True)
+            self._recount()
             return
 
         for batch in _batched(events, BATCH_BYTES):
@@ -161,11 +197,24 @@ class AuditLog:
             log.debug("shipped %d audit events, %s new", len(batch), accepted)
 
         self._sending.unlink(missing_ok=True)
+        self._recount()
 
         if self._dropped:
             log.info("audit queue drained; %d events had been dropped while full",
                      self._dropped)
             self._dropped = 0
+
+
+    def _recount(self) -> None:
+        """Re-derive the queued size from disk after files come and go."""
+        self._size = _size_of(self._live) + _size_of(self._sending)
+
+
+def _size_of(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
 
 
 def _batched(events: list[dict], limit: int) -> list[list[dict]]:

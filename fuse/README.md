@@ -116,21 +116,41 @@ If a refresh fails, the last good tree is served rather than blanking the mount.
 
     fswiki-mount ~/wiki --audit
 
-Off by default. With it, every `open()` records which process opened which
-document, spools it locally, and ships it to the server in batches.
+Off by default. With it, the mount identifies the process behind every open and
+every change, and reports it.
 
-    cat[525459]     cat ~/wiki/engineering/onboarding.md
-    grep[525461]    grep -rl Onboarding ~/wiki/engineering     (x3 documents)
+    cat[525459]     cat                                        open
+    grep[525461]    grep (+2 args)                             open   (x3 documents)
+    vim[525604]     vim                                        write
 
 The one-pid-many-opens shape is the useful part: it distinguishes an agent
 sweeping the tree from a person opening a page.
 
-Two things bound what this can be. `read()` and `write()` carry a file handle
-and no caller, so the granularity is opens, never bytes — an `mmap` shows up as
-one open and then silence. And the mount runs on the user's own machine, so
-`cmdline` and `comm` are forgeable and the whole thing is telemetry rather than
-evidence. [docs/audit-trail.md](../docs/audit-trail.md) has the measurements,
-the queue design, and which fields are worth anything.
+Reads go **over POST** while auditing, which is the whole trick. PostgREST runs
+GET in a read-only transaction, so a GET cannot record its own access; POST
+can, and `wiki.read_document()` returns the body and writes the access event in
+one transaction. So an audited read is witnessed by the server rather than
+merely reported by the client. Nobody auditing means nobody paying for it —
+reads stay on the plain GET.
+
+Anything the fetch cannot carry — a cached body, a draft, a refused open, a
+create or delete, a laptop with no network — goes to a local append-only queue
+and ships in batches. Both routes mint the event once and share its id, so the
+server's `on conflict` collapses them rather than counting twice.
+
+**Command lines are truncated to `argv[0]`.** `mysql -pSECRET` and friends put
+other people's credentials in `/proc/<pid>/cmdline`, and none of them are the
+wiki's business; what was dropped is counted (`"argv_elided": 3`) so a
+truncated command is never mistaken for a bare one. `--audit-argv` sends the
+lot, and warns when it does.
+
+Two things bound what this can ever be. `read()` and `write()` carry a file
+handle and no caller, so the granularity is opens and saves, never bytes — an
+`mmap` shows up as one open and then silence. And the mount runs on the user's
+own machine, so `cmdline` and `comm` are forgeable and the whole thing is
+telemetry rather than evidence. [docs/audit-trail.md](../docs/audit-trail.md)
+has the measurements, the routes that were tried and rejected, and which fields
+are worth anything.
 
 ## Mounting needs a setuid `fusermount3`
 
