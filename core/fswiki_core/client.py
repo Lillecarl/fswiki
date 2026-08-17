@@ -25,7 +25,10 @@ MANIFEST_COLUMNS = (
     "content_type,updated_at,version_created_at,capabilities"
 )
 
-DRAFT_COLUMNS = "id,operation,document_id,path,content,content_type,base_version,updated_at"
+DRAFT_COLUMNS = (
+    "id,operation,document_id,path,content,content_type,base_version,updated_at,"
+    "state,merged_from,pre_merge_content"
+)
 
 
 class PostgrestError(RuntimeError):
@@ -214,6 +217,51 @@ class Client:
             payload["p_paths"] = paths
         r = await self._http.post("/rpc/push", json=payload)
         return self._rows(r)
+
+    async def record_opens(self, events: list[dict]) -> int:
+        """File a batch of access events. Returns how many were new.
+
+        Idempotent on each event's id, so a client that never saw the response
+        can resend the batch and get 0 back rather than duplicate rows.
+        """
+        r = await self._http.post("/rpc/record_opens", json={"p_events": events})
+        if r.status_code >= 400:
+            raise PostgrestError(r)
+        value = r.json()
+        return value if isinstance(value, int) else 0
+
+    async def begin_merge(self, path: str, content: str, merged_from: int,
+                          *, conflicted: bool) -> dict | None:
+        """Record that a merge rewrote a draft, keeping the text it replaced."""
+        return await self._merge_rpc("begin_merge", {
+            "p_path": path,
+            "p_content": content,
+            "p_merged_from": merged_from,
+            "p_conflicted": conflicted,
+        })
+
+    async def resolve_merge(self, path: str) -> dict | None:
+        """Finish a merge: rebase onto what it pulled in and drop the backup."""
+        return await self._merge_rpc("resolve_merge", {"p_path": path})
+
+    async def abort_merge(self, path: str) -> dict | None:
+        """Back out: restore the text as it was before the merge."""
+        return await self._merge_rpc("abort_merge", {"p_path": path})
+
+    async def _merge_rpc(self, name: str, payload: dict) -> dict | None:
+        r = await self._http.post(
+            f"/rpc/{name}",
+            json=payload,
+            # The functions return the row they touched, and RLS filters rather
+            # than raising, so no row back means the draft was not the caller's
+            # to change. That has to read as a failure, not a silent success.
+            headers={"Accept": "application/vnd.pgrst.object+json"},
+        )
+        if r.status_code == 406:
+            return None
+        if r.status_code >= 400:
+            raise PostgrestError(r)
+        return r.json()
 
     async def delete_draft(self, path: str) -> bool:
         """Drop the caller's draft at `path`. True if there was one.
