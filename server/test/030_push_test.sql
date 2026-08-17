@@ -313,6 +313,82 @@ delete from wiki.draft;
 reset role;
 
 ------------------------------------------------------------------------------
+-- Creating over a document you are not allowed to see.
+--
+-- The tempting hole: push() reports a create collision by handing back the
+-- occupant's content, so guessing a path would be a way to read it. It does
+-- not, and two independent things stop it. push() is SECURITY INVOKER, so the
+-- existence probe and the content select are both RLS-filtered; and the
+-- capability lattice puts read below create, so anyone entitled to create at a
+-- path is entitled to read what is already there.
+------------------------------------------------------------------------------
+select wiki_test.login('erin');
+set role fswiki_user;
+
+insert into wiki.draft (author_id, operation, path, content)
+values (wiki.current_user_id(), 'create', 'root.engineering.secret-plans', 'probe');
+create temporary table push_probe as select * from wiki.push('probe');
+
+select wiki_test.expect_eq('push: creating over an invisible document is refused',
+  (select status::text from push_probe), 'forbidden');
+select wiki_test.expect_eq('push: and discloses no content',
+  (select server_content is null and base_content is null and server_version is null
+     from push_probe), true);
+delete from wiki.draft;
+reset role;
+
+-- Outside the role, because as erin the row is invisible and the count would be
+-- zero whether or not push had eaten it.
+select wiki_test.expect_eq('push: the occupant is untouched',
+  (select count(*)::int from wiki.document where path = 'root.engineering.secret-plans'), 1);
+
+-- The invariant the safety rests on, asserted directly rather than assumed:
+-- nowhere may anyone create where they cannot read.
+select wiki_test.expect_eq('nobody can create where they cannot read',
+  (select count(*)::int from wiki.document d, wiki.principal p
+    where p.kind = 'user'
+      and wiki.has_capability(d.id, 'create', p.id)
+      and not wiki.has_capability(d.id, 'read', p.id)),
+  0);
+
+------------------------------------------------------------------------------
+-- A deny on the name itself, under a folder you may create in.
+--
+-- This used to abort the whole call with a bare RLS 42501 from the insert,
+-- losing the report for every other document in the changeset. It has to come
+-- back as one refused row.
+------------------------------------------------------------------------------
+insert into wiki.ace (document_id, principal_id, role_id, ace_type,
+                      container_inherit, object_inherit)
+select d.id, wiki_test.who('grace'), wiki.role_id('author'), 'allow', true, true
+  from wiki.document d where d.path = 'root.engineering';
+insert into wiki.ace (document_id, principal_id, role_id, ace_type)
+select d.id, wiki_test.who('grace'), wiki.role_id('reader'), 'deny'
+  from wiki.document d where d.path = 'root.engineering.secret-plans';
+
+select wiki_test.login('grace');
+set role fswiki_user;
+
+insert into wiki.draft (author_id, operation, path, content)
+values (wiki.current_user_id(), 'create', 'root.engineering.secret-plans', 'probe');
+insert into wiki.draft (author_id, operation, path, content)
+values (wiki.current_user_id(), 'create', 'root.engineering.grace-notes', 'fine');
+create temporary table push_denied as select * from wiki.push('probe');
+
+select wiki_test.expect_eq('push: a deny on the name is reported, not raised',
+  (select status::text from push_denied where path = 'root.engineering.secret-plans'),
+  'forbidden');
+select wiki_test.expect_eq('push: the rest of the changeset is still reported',
+  (select status::text from push_denied where path = 'root.engineering.grace-notes'),
+  'published');
+select wiki_test.expect_eq('push: but all-or-nothing still holds, so nothing landed',
+  (select count(*)::int from wiki.document where path = 'root.engineering.grace-notes'),
+  0);
+delete from wiki.draft;
+reset role;
+delete from wiki.ace where principal_id = wiki_test.who('grace');
+
+------------------------------------------------------------------------------
 -- An unauthenticated caller cannot push at all.
 ------------------------------------------------------------------------------
 select set_config('request.jwt.claims', '', false);

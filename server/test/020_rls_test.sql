@@ -193,6 +193,43 @@ select wiki_test.expect_eq('explain_acl reports an unmatched capability',
     where capability = 'administer'),
   'deny (no matching ACE)');
 
+-- explain_acl must agree with the function that actually enforces. It used to
+-- report `grant: deny (no matching ACE)` for a document's owner, because it
+-- read the ACL and wiki.can() short-circuits ahead of it — right about the
+-- ACEs, wrong about the outcome, and wrong in the one place someone looks when
+-- a permission complaint has to be debugged.
+select wiki_test.expect_eq('explain_acl credits the owner with grant',
+  (select verdict from wiki.explain_acl(
+     wiki_test.doc('root.locked'), wiki_test.who('dave'))
+    where capability = 'grant'),
+  'allow (owner)');
+select wiki_test.expect_eq('explain_acl attributes it to the owner',
+  (select principal from wiki.explain_acl(
+     wiki_test.doc('root.locked'), wiki_test.who('dave'))
+    where capability = 'grant'),
+  'dave');
+select wiki_test.expect_eq('ownership buys grant and nothing else',
+  (select count(*)::int from wiki.explain_acl(
+     wiki_test.doc('root.locked'), wiki_test.who('dave'))
+    where verdict = 'allow (owner)'),
+  1);
+
+-- The generic form of the same guarantee: whatever explain_acl says about a
+-- capability, has_capability() must agree, for every capability and both an
+-- owner and a stranger. This is the assertion that would have caught it.
+select wiki_test.expect_eq('explain_acl agrees with has_capability everywhere',
+  (select coalesce(array_agg(x.capability::text order by x.who, x.capability), '{}')
+     from (
+       select u.who, e.capability, e.verdict
+         from (values ('dave'), ('carol'), ('erin')) u(who)
+         cross join lateral wiki.explain_acl(
+           wiki_test.doc('root.locked'), wiki_test.who(u.who)) e
+        where (e.verdict like 'allow%') is distinct from
+              wiki.has_capability(wiki_test.doc('root.locked'),
+                                  e.capability, wiki_test.who(u.who))
+     ) x),
+  '{}'::text[]);
+
 ------------------------------------------------------------------------------
 -- Owner lockout protection.
 ------------------------------------------------------------------------------

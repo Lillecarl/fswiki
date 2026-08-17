@@ -32,6 +32,7 @@
 create type wiki.push_status as enum (
   'published',  -- applied
   'conflict',   -- the document moved on beneath the draft; server state returned
+  'unmerged',   -- the draft is mid-merge and the author has not finished
   'forbidden',  -- the caller lacks the capability this operation needs
   'missing',    -- the document, or the destination folder, is not there
   'invalid'     -- the draft cannot be applied at all (bad shape, folder op, ...)
@@ -230,7 +231,17 @@ begin
     v_doc    := null;
     v_live   := null;
 
-    if d.operation <> 'create' then
+    -- Checked before anything else, and checked here rather than left to the
+    -- client. A half-resolved merge published is worse than a conflict: the
+    -- markers become the document and every later reader inherits them. The
+    -- client decides when a merge is finished; the server refuses to take its
+    -- word for it while the draft still says otherwise.
+    if d.state = 'conflicted' then
+      v_result.status := 'unmerged';
+      v_result.detail := 'the merge is unresolved; finish it or back it out';
+    end if;
+
+    if v_result.status = 'published' and d.operation <> 'create' then
       select * into v_doc from wiki.document where id = d.document_id;
 
       if v_doc.id is null then
@@ -296,6 +307,15 @@ begin
                   wiki.nearest_existing_ancestor(d.path), 'create', v_user) then
             v_result.status := 'forbidden';
             v_result.detail := 'no create capability on the containing folder';
+          elsif not wiki.can(d.path, false, v_user, 'create', v_user) then
+            -- Create on the folder is not create at *this* path: an inherited
+            -- allow can be overridden by a deny on the name itself. Without
+            -- this the insert goes ahead and RLS rejects it, which aborts the
+            -- whole call with a bare 42501 instead of reporting one refused
+            -- document — the caller loses the report for everything else in
+            -- the changeset along with it.
+            v_result.status := 'forbidden';
+            v_result.detail := 'the ACL denies creating at this path';
           end if;
 
         when 'update' then
@@ -433,11 +453,87 @@ $$;
 comment on function wiki.push(text, ltree[]) is
   'Publish the caller''s drafts atomically. All or nothing: if any returned row '
   'has a status other than ''published'', nothing was written and the drafts '
-  'remain. SECURITY DEFINER — every permission check inside is manual.';
+  'remain. SECURITY INVOKER: every statement inside is subject to RLS, and the '
+  'explicit capability checks are a second layer that turns a refusal into a '
+  'reported row instead of an aborted transaction.';
+
+------------------------------------------------------------------------------
+-- Getting into and out of a merge
+------------------------------------------------------------------------------
+
+-- Record that a merge rewrote a draft.
+--
+-- The merge itself is client work — the server has no opinion about what
+-- someone meant — but the *bookkeeping* belongs here, so that backing out is a
+-- single statement rather than a client remembering to keep a copy of
+-- something. p_conflicted is the client's verdict on its own merge.
+--
+-- Idempotent in the way that matters: merging twice does not lose the original,
+-- because pre_merge_content is only filled if it is empty. A user who merges,
+-- resolves badly, merges again and then backs out still lands on the text they
+-- wrote before any of it.
+create or replace function wiki.begin_merge(
+  p_path        ltree,
+  p_content     text,
+  p_merged_from integer,
+  p_conflicted  boolean
+)
+returns setof wiki.draft
+language sql volatile
+set search_path = wiki, public, pg_temp as $$
+  update wiki.draft
+     set pre_merge_content = coalesce(pre_merge_content, content),
+         content           = p_content,
+         merged_from       = p_merged_from,
+         state             = case when p_conflicted then 'conflicted'
+                                  else state end,
+         updated_at        = now()
+   where author_id = wiki.current_user_id()
+     and path = p_path
+  returning *;
+$$;
+
+-- The user finished resolving. Rebase onto the revision the merge pulled in and
+-- forget the merge, keeping the text they settled on.
+create or replace function wiki.resolve_merge(p_path ltree)
+returns setof wiki.draft
+language sql volatile
+set search_path = wiki, public, pg_temp as $$
+  update wiki.draft
+     set base_version      = coalesce(merged_from, base_version),
+         state             = 'clean',
+         pre_merge_content = null,
+         merged_from       = null,
+         updated_at        = now()
+   where author_id = wiki.current_user_id()
+     and path = p_path
+  returning *;
+$$;
+
+-- Back out. The pre-conflict text returns and the draft is exactly what it was
+-- before anyone merged anything — which is the promise that makes merging safe
+-- to offer at all. Published history was never involved.
+create or replace function wiki.abort_merge(p_path ltree)
+returns setof wiki.draft
+language sql volatile
+set search_path = wiki, public, pg_temp as $$
+  update wiki.draft
+     set content           = coalesce(pre_merge_content, content),
+         state             = 'clean',
+         pre_merge_content = null,
+         merged_from       = null,
+         updated_at        = now()
+   where author_id = wiki.current_user_id()
+     and path = p_path
+  returning *;
+$$;
 
 grant execute on function
     wiki.push(text, ltree[]),
     wiki.publish_revision(uuid, integer, ltree, text, text, text, boolean),
     wiki.ensure_folder(ltree),
-    wiki.nearest_existing_ancestor(ltree)
+    wiki.nearest_existing_ancestor(ltree),
+    wiki.begin_merge(ltree, text, integer, boolean),
+    wiki.resolve_merge(ltree),
+    wiki.abort_merge(ltree)
   to fswiki_user;

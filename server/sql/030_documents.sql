@@ -162,6 +162,16 @@ create trigger document_version_immutable
 
 create type wiki.draft_op as enum ('create', 'update', 'delete', 'move');
 
+-- Whether a draft is ready to publish or is mid-merge.
+--
+-- Deliberately a flag the client sets, not something inferred from the text.
+-- Grepping for conflict markers is how a client decides a merge is *resolved*,
+-- but it is a terrible way to decide one is *outstanding*: a page documenting a
+-- merge tool contains markers and must stay publishable, and a user who deletes
+-- the markers without choosing a side has resolved nothing. The flag says what
+-- happened; the text says what it looks like now.
+create type wiki.draft_state as enum ('clean', 'conflicted');
+
 -- A draft is one pending change by one author. The FUSE client composites these
 -- over the published tree so an author sees their own edits in place.
 create table wiki.draft (
@@ -181,11 +191,28 @@ create table wiki.draft (
   -- the changeset if the document has moved past it. Null only for 'create'.
   base_version integer,
 
+  -- Merge bookkeeping. A merge rewrites `content` in place — that is what makes
+  -- the result visible through the mount with no special case in the client —
+  -- so the text it replaced is kept here, and restoring it is how a user backs
+  -- out. Set by any merge, clean or not: a clean merge still rewrote work the
+  -- author had not published, and they are entitled to change their mind.
+  pre_merge_content text,
+  -- The revision the merge pulled in, so a resolved draft can be rebased onto
+  -- it without asking the server what it was at the time.
+  merged_from  integer,
+  state        wiki.draft_state not null default 'clean',
+
   created_at   timestamptz not null default now(),
   updated_at   timestamptz not null default now(),
 
   constraint draft_author_path_key unique (author_id, path),
   constraint draft_path_rooted check (path <@ 'root'::ltree),
+  -- The two merge columns travel together, and a conflict cannot exist without
+  -- something to go back to.
+  constraint draft_merge_shape check (
+    (pre_merge_content is null) = (merged_from is null)
+    and (state <> 'conflicted' or pre_merge_content is not null)
+  ),
   constraint draft_shape check (
     case operation
       when 'create' then document_id is null and base_version is null and content is not null

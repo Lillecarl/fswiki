@@ -371,21 +371,54 @@ returns table (
 )
 language sql stable security definer parallel safe
 set search_path = wiki, public, pg_temp as $$
+  -- wiki.can() decides two capabilities without consulting the ACL at all, and
+  -- both have to be modelled here or this function contradicts the one it
+  -- exists to explain. That is worse than not having it: a permission complaint
+  -- gets debugged against an answer the enforcement path never gave.
+  --
+  -- The owner's standing 'grant' is the one that used to be missing. A document
+  -- owner who holds no ACE at all still comes back from capabilities_at() as
+  -- {grant}, while this said `grant: deny (no matching ACE)` — correct about
+  -- the ACL, wrong about the outcome.
+  with subject as (
+    select d.path,
+           wiki.is_superuser(p_user) as by_superuser,
+           exists (select 1 from wiki.effective_principals(p_user) ep
+                    where ep.principal_id = d.owner_id) as by_owner,
+           owner.name as owner_name
+      from wiki.document d
+      left join wiki.principal owner on owner.id = d.owner_id
+     where d.id = p_document
+  )
   select
     caps.c,
     case
-      when wiki.is_superuser(p_user) then 'allow (superuser)'
+      when o.superuser then 'allow (superuser)'
+      when o.owner     then 'allow (owner)'
       when winner.ace_type = 'allow' then 'allow'
       when winner.ace_type = 'deny'  then 'deny'
       else 'deny (no matching ACE)'
     end,
-    winner.distance,
-    src.path,
-    winner.ace_type,
-    prin.name,
-    r.name,
-    winner.distance > 0
-  from unnest(enum_range(null::wiki.capability)) as caps(c)
+    -- An override is not a distance-N ACE, so the columns that describe *which*
+    -- ACE won say so rather than pointing at one that lost. The owner rule does
+    -- attach to a document, so that much is worth reporting.
+    case when o.superuser or o.owner then 0    else winner.distance end,
+    case when o.superuser then null
+         when o.owner     then s.path
+         else src.path end,
+    case when o.superuser or o.owner then null else winner.ace_type end,
+    case when o.superuser then null
+         when o.owner     then s.owner_name
+         else prin.name end,
+    case when o.superuser or o.owner then null else r.name end,
+    case when o.superuser or o.owner then false else winner.distance > 0 end
+  from subject s
+  cross join unnest(enum_range(null::wiki.capability)) as caps(c)
+  cross join lateral (
+    select s.by_superuser as superuser,
+           -- Ownership buys the right to repair the ACL, and nothing else.
+           s.by_owner and caps.c = 'grant' as owner
+  ) o
   left join lateral (
     select a.ace_type, c.distance, a.document_id, a.principal_id, a.role_id
       from wiki.acl_chain(p_document) c
