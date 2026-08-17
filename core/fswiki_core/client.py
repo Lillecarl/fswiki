@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 # Everything the client needs to build a tree and stat every entry in it,
 # without pulling a single document body.
 MANIFEST_COLUMNS = (
-    "id,path,slug,is_folder,title,owner_id,version,size,"
+    "id,path,slug,is_folder,title,owner_id,version,version_author_id,size,"
     "content_type,updated_at,version_created_at,capabilities"
 )
 
@@ -176,6 +176,29 @@ class Client:
         )
         rows = self._rows(r)
         return rows[0] if rows else {}
+
+    async def revision(self, document_id: str, version: int) -> str | None:
+        """The content of one historical revision, or None if it is not there.
+
+        This is the merge base. It comes from `document_version` directly rather
+        than a view, because the tip views deliberately show only the open
+        revision — the ancestor an edit descends from is by definition closed.
+
+        Note the policy on that table gates on `read`, not `sync`, so a caller
+        who may read a document but not mirror it can still pull an old revision
+        this way. That asymmetry predates this method; it is worth closing, and
+        `syncable_document` is the shape to copy when doing so.
+        """
+        r = await self._http.get(
+            "/document_version",
+            params={
+                "select": "content",
+                "document_id": f"eq.{document_id}",
+                "version": f"eq.{version}",
+            },
+        )
+        rows = self._rows(r)
+        return rows[0]["content"] if rows else None
 
     async def push(self, message: str | None, paths: list[str] | None = None) -> list[dict]:
         """Promote drafts to published revisions.
