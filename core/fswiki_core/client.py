@@ -134,14 +134,13 @@ class Client:
         a short poll interval affordable. None if the server predates the
         function — callers should fall back to refetching unconditionally.
         """
-        # `stable`, so PostgREST runs it in a read-only transaction even over
-        # POST — which impersonation refuses, because it could not log itself
-        # there. None is already the documented "refetch unconditionally"
-        # answer, so an impersonated client polls a little harder and nothing
-        # else changes.
-        if self.impersonating:
-            return None
-        r = await self._http.post("/rpc/change_token", json={})
+        # change_token() is `stable`, so PostgREST runs it read-only even over
+        # POST, which impersonation refuses. `changed()` is the volatile form.
+        # Not a nicety: without it an impersonated mount refetches the whole
+        # manifest on every poll, which is six kilobytes for nothing and a
+        # steady drip of requests into the impersonation log.
+        rpc = "changed" if self.impersonating else "change_token"
+        r = await self._http.post(f"/rpc/{rpc}", json={})
         if r.status_code == 404:
             return None
         if r.status_code >= 400:

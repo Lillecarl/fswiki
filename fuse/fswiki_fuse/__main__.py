@@ -55,6 +55,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     ap.add_argument("--read-only", action="store_true", help="refuse all writes")
     ap.add_argument(
+        "--as", dest="act_as", metavar="USER",
+        help="mount someone else's view of the wiki. Needs a grant on the "
+             "server, which records that you did it. Always read-only",
+    )
+    ap.add_argument(
+        "--as-group", dest="act_as_groups", metavar="GROUP", action="append",
+        help="mount the view of somebody whose only memberships are these "
+             "groups; repeatable, and meant to be. Name every group a real "
+             "member would be in — one group alone is not anybody's view, and "
+             "reads both too little and too much",
+    )
+    ap.add_argument(
         "--audit", action="store_true",
         help="identify the process behind every open from /proc and report it "
              "to the server. Costs microseconds against the round trip open() "
@@ -87,11 +99,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 async def run(args: argparse.Namespace) -> int:
-    client = Client(args.url, args.token)
+    if args.act_as and args.act_as_groups:
+        log.error("--as and --as-group are different questions; pick one")
+        return 1
+    acting_as = (args.act_as if args.act_as else
+                 "a member of " + ", ".join(args.act_as_groups)
+                 if args.act_as_groups else None)
+
+    client = Client(args.url, args.token,
+                    act_as=args.act_as, act_as_groups=args.act_as_groups)
     try:
         try:
             principal = await client.whoami()
         except PostgrestError as exc:
+            # A refused impersonation arrives here as a 403, and calling that
+            # "cannot reach" would send someone to look at the network when the
+            # server answered perfectly clearly.
+            if exc.status == 403 and acting_as:
+                log.error("the server refused it: %s",
+                          exc.body.get("message", exc)
+                          if isinstance(exc.body, dict) else exc)
+                return 1
             log.error("cannot reach %s: %s", args.url, exc)
             return 1
         except OSError as exc:
@@ -106,6 +134,25 @@ async def run(args: argparse.Namespace) -> int:
             log.warning("no token: mounting read-only, and anonymous sees nothing")
 
         audit = None
+        if args.audit and acting_as:
+            # An impersonated request cannot write an access event -- the
+            # transaction is read only by then, and the server has already
+            # filed an impersonation_event instead, which is the truer record
+            # of what happened. Enabling both would only build a queue that can
+            # never ship.
+            log.error("--audit and --as cannot be combined: an impersonated "
+                      "read is recorded as an impersonation, not as an access")
+            return 1
+
+        if acting_as:
+            # Said once, loudly, at the only moment anyone is looking at this
+            # terminal — and after everything that could refuse, so it is never
+            # printed about a mount that does not happen. The mount itself has
+            # no banner to put it in, which is why every file in it is 0444 and
+            # the mountpoint is `ro`.
+            log.warning("mounting the view of %s — not yours. Read-only, and "
+                        "the server has a record of it", acting_as)
+
         if args.audit:
             if principal is None:
                 log.error("--audit needs a token: events are filed against a "
@@ -123,7 +170,13 @@ async def run(args: argparse.Namespace) -> int:
             principal,
             ttl=args.ttl,
             poll=args.poll,
-            read_only=args.read_only or principal is None,
+            # Impersonation is read-only on the server, by a transaction the
+            # client cannot influence. Setting it here too is not a second
+            # implementation of that rule: it is so the refusal arrives at
+            # open() as EROFS, where an editor can act on it, instead of at
+            # save time as a 25006 the user cannot do anything about.
+            read_only=args.read_only or principal is None or bool(acting_as),
+            show_drafts=not args.read_only,
             audit=audit,
         )
         try:
@@ -136,6 +189,14 @@ async def run(args: argparse.Namespace) -> int:
         options = set(pyfuse3.default_options)
         options.add("fsname=fswiki")
         options.discard("default_permissions")
+        if fs.read_only:
+            # The kernel then refuses writes before they ever reach us, which
+            # is the same move as `set transaction read only` on the server and
+            # as the preview server refusing methods before routing: a property
+            # of the mount rather than an inventory of the handlers that
+            # remembered to check. The handlers still check, because two
+            # independent enforcements is what makes a property one.
+            options.add("ro")
         if args.allow_other:
             options.add("allow_other")
         if args.debug_fuse:

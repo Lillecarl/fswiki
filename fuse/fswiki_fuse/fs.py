@@ -97,6 +97,7 @@ class FswikiFs(pyfuse3.Operations):
         ttl: float = 5.0,
         poll: float | None = None,
         read_only: bool = False,
+        show_drafts: bool = True,
         audit: "AuditLog | None" = None,
     ) -> None:
         super().__init__()
@@ -113,6 +114,13 @@ class FswikiFs(pyfuse3.Operations):
         # checking more often than the kernel asks is nearly free.
         self._poll = ttl if poll is None else poll
         self._read_only = read_only or principal_id is None
+        # Not the same question as read_only, though it used to ride on it. An
+        # impersonated mount is read-only and *should* show the subject's
+        # drafts, because a draft is part of what that person sees when they
+        # look at their own wiki -- and "I can't see X" is quite often about a
+        # file they have not pushed. Anonymous still gets none: there is nobody
+        # for a draft to belong to.
+        self._show_drafts = show_drafts and principal_id is not None
 
         self._inodes = InodeTable()
         self._tree: Tree | None = None
@@ -138,6 +146,16 @@ class FswikiFs(pyfuse3.Operations):
 
         self._uid = os.getuid()
         self._gid = os.getgid()
+
+    @property
+    def read_only(self) -> bool:
+        """Whether this mount refuses writes, for whatever reason.
+
+        Read by the caller to pick the kernel's mount options, so it has to be
+        the settled answer rather than the flag that was passed in: no token
+        and impersonation both arrive here as well.
+        """
+        return self._read_only
 
     # ------------------------------------------------------------------
     # Tree maintenance
@@ -193,7 +211,7 @@ class FswikiFs(pyfuse3.Operations):
                 return self._tree
 
             manifest = await self._client.manifest()
-            drafts = await self._client.drafts() if not self._read_only else []
+            drafts = await self._client.drafts() if self._show_drafts else []
             tree = build(manifest, drafts)
 
             self._inodes.pin_root(tree.root_key)
