@@ -60,13 +60,34 @@ create table wiki.impersonation_event (
   -- Exactly one of these two.
   subject_id   uuid references wiki.principal(id) on delete cascade,
   subject_groups uuid[],
+
+  -- A session, not a request. The hook runs per request and a mount makes a
+  -- great many of them -- measured, a single `ls` of an impersonated mount is
+  -- four -- so a row each would bury the thing anyone actually wants to know
+  -- under its own volume. "dave acted as bob for forty minutes, 1,200
+  -- requests" is both smaller and a better answer to the question the table
+  -- exists for than 1,200 rows saying the same thing.
+  --
+  -- The fidelity given up is per-request timing, which belongs to an access
+  -- log; this is not one. What it must never lose is that the impersonation
+  -- happened at all, and collapsing repeats cannot lose that.
   occurred_at  timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  requests     integer not null default 1,
+  -- Of the request that opened the session.
   method       text,
   path         text,
 
   constraint impersonation_event_one_subject
     check ((subject_id is null) <> (subject_groups is null))
 );
+
+-- How long a gap ends a session. Long enough that ordinary use is one row,
+-- short enough that coming back tomorrow is a new one.
+create or replace function wiki.impersonation_session_gap()
+returns interval language sql immutable parallel safe as $$
+  select interval '5 minutes';
+$$;
 
 create index impersonation_event_actor_idx
   on wiki.impersonation_event (actor_id, occurred_at desc);
@@ -140,6 +161,38 @@ $$;
 -- Entering it
 ------------------------------------------------------------------------------
 
+-- Extend the open session, or open one. Called only from begin_impersonation,
+-- and only while the transaction can still be written to.
+create or replace function wiki.note_impersonation(
+  p_actor uuid, p_subject uuid, p_groups uuid[], p_method text, p_path text
+) returns void
+language plpgsql volatile security definer
+set search_path = wiki, public, pg_temp as $$
+begin
+  with open_session as (
+    select e.id
+      from wiki.impersonation_event e
+     where e.actor_id = p_actor
+       and e.subject_id     is not distinct from p_subject
+       and e.subject_groups is not distinct from p_groups
+       and e.last_seen_at > now() - wiki.impersonation_session_gap()
+     order by e.last_seen_at desc
+     limit 1
+  )
+  update wiki.impersonation_event e
+     set last_seen_at = now(),
+         requests     = e.requests + 1
+    from open_session s
+   where e.id = s.id;
+
+  if not found then
+    insert into wiki.impersonation_event
+      (actor_id, subject_id, subject_groups, method, path)
+    values (p_actor, p_subject, p_groups, p_method, p_path);
+  end if;
+end;
+$$;
+
 -- Authorise, record, switch, lock. In that order, in one statement.
 --
 -- SECURITY DEFINER because it runs as the caller's role, which has no business
@@ -195,16 +248,14 @@ begin
         coalesce((select name from wiki.principal where id = p_subject), p_subject::text)
         using errcode = 'insufficient_privilege';
     end if;
-    insert into wiki.impersonation_event (actor_id, subject_id, method, path)
-      values (v_actor, p_subject, p_method, p_path);
+    perform wiki.note_impersonation(v_actor, p_subject, null, p_method, p_path);
     perform set_config('fswiki.act_as', p_subject::text, true);
   else
     if not wiki.may_impersonate_groups(v_actor, p_groups) then
       raise exception 'not permitted to act as that membership'
         using errcode = 'insufficient_privilege';
     end if;
-    insert into wiki.impersonation_event (actor_id, subject_groups, method, path)
-      values (v_actor, p_groups, p_method, p_path);
+    perform wiki.note_impersonation(v_actor, null, p_groups, p_method, p_path);
     perform set_config('fswiki.act_as_groups', p_groups::text, true);
   end if;
 
@@ -401,6 +452,19 @@ grant execute on function
     wiki.document_at(ltree),
     wiki.list_drafts()
   to fswiki_user;
+
+-- change_token(), for the same reason -- and this one is not a nicety. Without
+-- it an impersonated client cannot ask "has anything changed?", so a mount
+-- refetches the whole manifest every poll, which is both a pointless six
+-- kilobytes and a steady drip into the log above.
+create or replace function wiki.changed()
+returns text
+language sql volatile
+set search_path = wiki, public, pg_temp as $$
+  select wiki.change_token();
+$$;
+
+grant execute on function wiki.changed() to fswiki_user;
 
 -- whoami, for the same reason. current_user_id() is `stable`, so PostgREST runs
 -- it read-only even over POST and impersonation refuses it -- which would mean

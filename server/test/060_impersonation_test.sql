@@ -297,6 +297,62 @@ select wiki_test.expect_eq('and it did not lock anything down',
         where p1.name = 'grace' and p2.name = 'auditors'$q$), null::text);
 
 ------------------------------------------------------------------------------
+-- One session, not one row per request
+------------------------------------------------------------------------------
+--
+-- The hook runs on every request, and a mount makes a great many: measured, a
+-- single `ls` of an impersonated mount is four. A row each would bury the fact
+-- anyone cares about under its own volume.
+
+create temp table before_repeat as
+  select count(*)::int as n from wiki.impersonation_event;
+
+begin;
+  select wiki_test.login('dave');
+  select wiki.begin_impersonation(p_subject => wiki_test.who('bob'),
+                                  p_method => 'POST', p_path => '/rpc/read_document');
+commit;
+begin;
+  select wiki_test.login('dave');
+  select wiki.begin_impersonation(p_subject => wiki_test.who('bob'),
+                                  p_method => 'POST', p_path => '/rpc/list_documents');
+commit;
+
+select wiki_test.expect_eq('repeat requests do not add rows',
+  (select count(*)::int from wiki.impersonation_event) - (select n from before_repeat), 0);
+
+select wiki_test.expect_eq('they extend the session instead',
+  (select requests >= 3 from wiki.impersonation_event
+    where subject_id = wiki_test.who('bob')), true);
+
+-- A different subject is a different session, however close together they are.
+begin;
+  select wiki_test.login('dave');
+  select wiki.begin_impersonation(p_subject => wiki_test.who('carol'),
+                                  p_method => 'POST', p_path => '/rpc/opened-it');
+commit;
+begin;
+  select wiki_test.login('dave');
+  select wiki.begin_impersonation(p_subject => wiki_test.who('carol'),
+                                  p_method => 'POST', p_path => '/rpc/came-later');
+commit;
+
+select wiki_test.expect_eq('a different subject opens its own session',
+  (select count(*)::int from wiki.impersonation_event
+    where subject_id = wiki_test.who('carol')), 1);
+
+-- The opening request is what the row names. A session that renamed itself to
+-- whatever arrived last would answer a question nobody asked, and would make
+-- the timestamp and the path describe different requests.
+select wiki_test.expect_eq('and it names the request that opened it, not the last one',
+  (select path from wiki.impersonation_event where subject_id = wiki_test.who('carol')),
+  '/rpc/opened-it');
+
+select wiki_test.expect_eq('and does not disturb the other one',
+  (select count(*)::int from wiki.impersonation_event
+    where subject_id = wiki_test.who('bob')), 1);
+
+------------------------------------------------------------------------------
 -- The trail
 ------------------------------------------------------------------------------
 
