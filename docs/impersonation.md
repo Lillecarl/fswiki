@@ -362,11 +362,12 @@ thing to be wrong about at three in the morning. An unresolvable name raises,
 rather than acting as nobody, which would look indistinguishable from the
 feature working.
 
-The CLI carries them on any command:
+The CLI and the mount carry them the same way:
 
 ```
 fswiki --as bob preview
 fswiki --as-group everyone --as-group engineering render engineering/onboarding
+fswiki-mount --as bob ~/bobs-wiki
 ```
 
 `--as-group` is repeatable and is meant to be repeated. Naming one group is the
@@ -377,6 +378,43 @@ Nothing in the CLI refuses to write while impersonating, and nothing should:
 `fswiki --as bob push` reaches the server and comes back `25006`. A client-side
 check would be a second implementation of a rule the server already enforces,
 and the second implementation is the one that drifts.
+
+### The mount
+
+An impersonated mount is read-only, and the interesting part is where.
+
+The server has already settled it — `transaction_read_only` refuses the write
+whatever the client believes. But a filesystem that accepts a write and fails
+at save time is a filesystem that has lied to an editor, and by then the user
+has typed a paragraph they are about to lose. So the mount refuses at `open()`,
+where an editor can still act on it.
+
+That is not a second implementation of the rule. It is the same rule, arriving
+early enough to be useful.
+
+Three layers, and only the last is ours to forget:
+
+1. `ro` in the FUSE mount options, so the **kernel** rejects writes before they
+   reach the process at all. Measured: append, create, unlink and rename all
+   return `EROFS`, and `findmnt` says `ro`.
+2. every file reported `0444`, so an editor sees it coming.
+3. the existing per-handler checks, which now cannot be reached.
+
+The first is the one worth having, for the same reason `set transaction read
+only` is: it is a property of the mount rather than an inventory of the handlers
+that remembered. `--read-only` gained it too, having had only the third.
+
+**Drafts belong to a person, and an impersonated mount shows them.** This used
+to ride on the read-only flag and now does not, because they are different
+questions. A support case is very often about a file that was never pushed, so
+hiding drafts would answer the wrong one. A membership has none, correctly and
+without a special case: a hypothetical worker is not anybody, so no draft is
+theirs.
+
+`--audit` and `--as` are refused together. An impersonated request cannot write
+an access event — the transaction is read-only by then, and the server filed an
+`impersonation_event` instead — so enabling both would only build a queue that
+could never ship.
 
 ### Saying so, on every page
 
@@ -390,6 +428,32 @@ The wording is `viewing as a member of everyone, engineering`, not `viewing as
 engineering` — for the same reason the model uses a set. Saying "as
 engineering" would name the thing this design exists to distinguish itself
 from.
+
+The mount has nowhere to put a banner, which is exactly why it says it once at
+startup and then says it structurally: every file `0444`, the mountpoint `ro`.
+
+## One session, not one row per request
+
+The hook runs on every request, and a client makes a great many — measured, a
+single `ls` of an impersonated mount is four, and an idle mount polls. A row
+each would have buried the fact anyone cares about under its own volume, at
+tens of thousands of rows a day for one mount left open.
+
+So a row is a **session**: repeats within five minutes extend it, bumping
+`last_seen_at` and `requests`. "dave acted as bob for forty minutes, 1,200
+requests" is both smaller than 1,200 rows and a better answer to the question
+the table exists for. The row keeps the method and path of the request that
+*opened* it, not the last one, so its timestamp and its path describe the same
+event.
+
+What is given up is per-request timing, which is what an access log is for and
+this is not. What cannot be given up — that the impersonation happened at all —
+collapsing repeats cannot lose.
+
+That volume is also why `changed()` exists. Without a volatile
+`change_token()`, an impersonated mount cannot ask "has anything moved?" and so
+refetches the entire manifest every poll: six kilobytes for nothing, and a
+steady drip into this table.
 
 ## The audit trail under impersonation
 
