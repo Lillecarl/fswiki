@@ -130,6 +130,8 @@ def _missing(path: str) -> str:
 
 
 _STYLE = """
+.acting{background:#7c2d12;color:#fff;padding:.4rem .8rem;font:600 .85rem/1.4
+  system-ui,sans-serif;letter-spacing:.02em}
 /* One token set, both schemes. The page is text and the styling should get
    out of its way; the only things that earn colour are links and the state
    line, because those are the two things you look for rather than read. */
@@ -219,12 +221,23 @@ _RELOAD = """
 """
 
 
+# Set once at startup from the client, because the whole failure mode of
+# impersonation is forgetting you are doing it. A page that looks exactly like
+# your own wiki, minus a few things, is indistinguishable from your own wiki
+# having lost a few things — so this is on every page rather than on a status
+# screen someone has to think to visit.
+_ACTING_AS: str | None = None
+
+
 def _shell(title: str, body: str, path: str, state: str | None) -> str:
     crumb = html.escape(paths.to_display(path)) if path else "Contents"
+    banner = (f"<div class=acting>viewing as {html.escape(_ACTING_AS)}"
+              f" &middot; read-only</div>" if _ACTING_AS else "")
     return (
         "<!doctype html><html><head><meta charset=utf-8>"
         f"<meta name=viewport content='width=device-width,initial-scale=1'>"
         f"<title>{html.escape(title)}</title><style>{_STYLE}</style></head><body>"
+        f"{banner}"
         f"<header><a class=brand href='/'>fswiki</a>"
         f"<span class=state>{crumb}{' &middot; ' + html.escape(state) if state else ''}"
         f"</span></header>{body}"
@@ -314,8 +327,11 @@ async def _respond(preview: Preview, route: str) -> tuple[int, str, bytes]:
 
 
 async def serve(client: Client, *, host: str, port: int,
-                backend: str | None = None, drafts: bool = True) -> int:
+                backend: str | None = None, drafts: bool = True,
+                acting_as: str | None = None) -> int:
     """Run until interrupted. Returns a process exit code."""
+    global _ACTING_AS
+    _ACTING_AS = acting_as
     preview = Preview(client, backend=backend, drafts=drafts)
 
     # Fail before binding if the renderer is not installed, rather than
@@ -342,6 +358,9 @@ async def serve(client: Client, *, host: str, port: int,
             print(f"  listening on {host}: anyone who can reach this port reads "
                   f"everything your token can read, with no login.",
                   file=sys.stderr)
+        if acting_as:
+            print(f"  showing the view of {acting_as} — not yours, and the "
+                  f"server has a record of it", file=sys.stderr)
         print("  read-only; ctrl-c to stop", file=sys.stderr)
 
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)

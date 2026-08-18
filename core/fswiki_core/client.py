@@ -49,12 +49,28 @@ class PostgrestError(RuntimeError):
 
 
 class Client:
-    """One connection pool, one identity."""
+    """One connection pool, one identity.
 
-    def __init__(self, base_url: str, token: str | None, *, timeout: float = 15.0) -> None:
+    Two identities, strictly speaking, when impersonating: the token stays the
+    caller's and the server resolves the borrowed one. Nothing here decides
+    anything about permissions — the headers are a request, and the server
+    refuses them unless a grant says otherwise.
+    """
+
+    def __init__(self, base_url: str, token: str | None, *, timeout: float = 15.0,
+                 act_as: str | None = None,
+                 act_as_groups: list[str] | None = None) -> None:
         headers = {"Accept": "application/json"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
+        if act_as and act_as_groups:
+            raise ValueError("act as a person or a membership, not both")
+        if act_as:
+            headers["Fswiki-Act-As"] = act_as
+        if act_as_groups:
+            headers["Fswiki-Act-As-Groups"] = ",".join(act_as_groups)
+        # Every read below has two forms because of this flag. See _reading().
+        self.impersonating = bool(act_as or act_as_groups)
         self._http = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             headers=headers,
@@ -75,6 +91,23 @@ class Client:
         payload = response.json()
         return payload if isinstance(payload, list) else [payload]
 
+    async def _reading(self, path: str, rpc: str, *, params: dict | None = None,
+                       body: dict | None = None) -> httpx.Response:
+        """One read, over whichever transport the server will allow.
+
+        A GET runs in a read-only transaction, and impersonation refuses any
+        transaction it cannot write its own log into — so while impersonating,
+        every read goes through the volatile RPC form instead. The rows are the
+        same: the functions are SECURITY INVOKER over the same views, and the
+        `select` parameter works on either.
+
+        Not a fallback and not a retry. Which transport is correct is known
+        before the request, so there is no failed round trip to pay for.
+        """
+        if self.impersonating:
+            return await self._http.post(f"/rpc/{rpc}", params=params, json=body or {})
+        return await self._http.get(path, params=params)
+
     # -- identity ----------------------------------------------------------
 
     async def whoami(self) -> str | None:
@@ -83,7 +116,12 @@ class Client:
         Worth calling at mount time even though nothing needs the value yet: it
         turns an expired token into one clear error instead of an empty wiki.
         """
-        r = await self._http.post("/rpc/current_user_id", json={})
+        # current_user_id() is `stable` and so read-only, which impersonation
+        # refuses; acting_as() is the volatile form of the same question. A
+        # client that could borrow an identity but not name it would be a poor
+        # tool for the one job impersonation has.
+        rpc = "acting_as" if self.impersonating else "current_user_id"
+        r = await self._http.post(f"/rpc/{rpc}", json={})
         if r.status_code >= 400:
             raise PostgrestError(r)
         value = r.json()
@@ -96,6 +134,13 @@ class Client:
         a short poll interval affordable. None if the server predates the
         function — callers should fall back to refetching unconditionally.
         """
+        # `stable`, so PostgREST runs it in a read-only transaction even over
+        # POST — which impersonation refuses, because it could not log itself
+        # there. None is already the documented "refetch unconditionally"
+        # answer, so an impersonated client polls a little harder and nothing
+        # else changes.
+        if self.impersonating:
+            return None
         r = await self._http.post("/rpc/change_token", json={})
         if r.status_code == 404:
             return None
@@ -113,8 +158,8 @@ class Client:
         KB — bob's is 3.6 KB against the dev fixtures — so paging it in per
         directory would cost more requests to save nothing.
         """
-        r = await self._http.get(
-            "/syncable_document",
+        r = await self._reading(
+            "/syncable_document", "list_documents",
             params={"select": MANIFEST_COLUMNS, "order": "path"},
         )
         return self._rows(r)
@@ -135,7 +180,12 @@ class Client:
         Without `event` it stays a GET, which is cacheable and idempotent and
         the right thing when nobody is auditing.
         """
-        if event is not None:
+        if event is not None or self.impersonating:
+            # p_event is nullable, so the RPC is also the un-audited read. That
+            # matters while impersonating, where the GET below is not available
+            # at all -- and it costs nothing, since an impersonated read writes
+            # no access event anyway (the hook wrote an impersonation_event
+            # instead, which is the truer record of what happened).
             r = await self._http.post(
                 "/rpc/read_document",
                 json={"p_document": document_id, "p_event": event},
@@ -158,10 +208,11 @@ class Client:
         and "not yours to mirror" are the same answer — which is the answer a
         renderer wants, since telling them apart is how a link graph leaks.
         """
-        r = await self._http.get(
-            "/syncable_document",
+        r = await self._reading(
+            "/syncable_document", "document_at",
             params={"select": "id,path,content,content_type,version",
-                    "path": f"eq.{path}"},
+                    **({} if self.impersonating else {"path": f"eq.{path}"})},
+            body={"p_path": path},
         )
         rows = self._rows(r)
         return rows[0] if rows else None
@@ -169,7 +220,7 @@ class Client:
     # -- drafts ------------------------------------------------------------
 
     async def drafts(self) -> list[dict]:
-        r = await self._http.get("/draft", params={"select": DRAFT_COLUMNS})
+        r = await self._reading("/draft", "list_drafts", params={"select": DRAFT_COLUMNS})
         return self._rows(r)
 
     async def put_draft(

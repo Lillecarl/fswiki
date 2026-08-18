@@ -34,6 +34,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--token", default=os.environ.get("FSWIKI_TOKEN"),
                     help="JWT; defaults to $FSWIKI_TOKEN")
     ap.add_argument("--no-colour", action="store_true", help="plain output")
+    # Read-only by construction on the server, so there is no --apply to guard
+    # here and no command that needs to refuse itself: an impersonated write is
+    # refused by the transaction it runs in. See docs/impersonation.md.
+    ap.add_argument("--as", dest="act_as", metavar="USER",
+                    help="see the wiki as this person (needs a grant)")
+    ap.add_argument("--as-group", dest="act_as_groups", metavar="GROUP",
+                    action="append",
+                    help="see it as a member of these groups; repeatable. "
+                         "Name every group a real member would be in — one "
+                         "group alone is not a person's view")
 
     sub = ap.add_subparsers(dest="command", required=True)
 
@@ -92,6 +102,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return ap.parse_args(argv)
 
 
+def _acting_as(args: argparse.Namespace) -> str | None:
+    """How to describe the borrowed identity to a human, or None.
+
+    Names rather than uuids, and the group form says "a member of" because that
+    is what it is: not the group, but somebody whose only memberships are those.
+    Getting this wording wrong is how the two get confused, which is the exact
+    confusion the group-set model exists to prevent.
+    """
+    if args.act_as:
+        return args.act_as
+    if args.act_as_groups:
+        return "a member of " + ", ".join(args.act_as_groups)
+    return None
+
+
 async def run(args: argparse.Namespace) -> int:
     if args.command == "render" and args.list_backends:
         for backend in render.available():
@@ -99,7 +124,12 @@ async def run(args: argparse.Namespace) -> int:
             print(f"  {backend.name:<16} {backend.version:<10} {types}")
         return 0
 
-    client = Client(args.url, args.token)
+    if args.act_as and args.act_as_groups:
+        print("fswiki: --as and --as-group are different questions; pick one",
+              file=sys.stderr)
+        return 1
+    client = Client(args.url, args.token,
+                    act_as=args.act_as, act_as_groups=args.act_as_groups)
     try:
         try:
             principal = await client.whoami()
@@ -124,7 +154,8 @@ async def run(args: argparse.Namespace) -> int:
         if args.command == "preview":
             return await preview.serve(client, host=args.host, port=args.port,
                                        backend=args.backend,
-                                       drafts=not args.published)
+                                       drafts=not args.published,
+                                       acting_as=_acting_as(args))
 
         if args.command == "status":
             print(report.render_status(drafts))
