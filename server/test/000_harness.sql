@@ -60,6 +60,24 @@ begin
 end;
 $$;
 
+-- The SQLSTATE a statement fails with, or NULL if it succeeded.
+--
+-- expect_rejected() records its verdict by writing to wiki_test.result, which a
+-- read-only transaction forbids -- and a read-only transaction is exactly what
+-- the impersonation tests need to make assertions about. This separates the
+-- measuring from the recording so the measuring can happen anywhere.
+create or replace function wiki_test.sqlstate_of(p_sql text)
+returns text
+language plpgsql security invoker
+set search_path = wiki, wiki_test, public, pg_temp as $$
+begin
+  execute p_sql;
+  return null;
+exception when others then
+  return sqlstate;
+end;
+$$;
+
 -- Assert that a statement is refused by a constraint or trigger. Optionally
 -- pins the SQLSTATE so a test cannot pass on an unrelated failure.
 create or replace function wiki_test.expect_rejected(
@@ -114,6 +132,16 @@ $$;
 
 -- Switch the session to a wiki user, the way PostgREST does: verify the token,
 -- stash its claims in a GUC, then drop to the low-privilege role.
+-- who() is users only, so groups need their own lookup. Keeping them apart is
+-- deliberate: a test that says who('everyone') has confused a group for a
+-- person, and silently returning NULL would let it pass.
+create or replace function wiki_test.grp(p_name text)
+returns uuid
+language sql stable security definer
+set search_path = wiki, public, pg_temp as $$
+  select wiki.principal_id('group', p_name);
+$$;
+
 create or replace function wiki_test.login(p_subject text)
 returns void
 language plpgsql

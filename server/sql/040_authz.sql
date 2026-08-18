@@ -23,7 +23,7 @@ language sql stable parallel safe as $$
   );
 $$;
 
-create or replace function wiki.current_user_id()
+create or replace function wiki.authenticated_user_id()
 returns uuid
 language sql stable security definer parallel safe
 set search_path = wiki, public, pg_temp as $$
@@ -34,9 +34,76 @@ set search_path = wiki, public, pg_temp as $$
      and ua.oidc_subject = wiki.jwt_claims() ->> 'sub';
 $$;
 
+comment on function wiki.authenticated_user_id() is
+  'Principal id of the token holder, or NULL when unauthenticated. Never '
+  'impersonated. If you add direct libpq clients, resolve them here from '
+  'current_user rather than the JWT GUC.';
+
+-- IMPERSONATION
+-- -------------
+-- Two GUCs, both transaction-local, both set only by wiki.begin_impersonation()
+-- in 100_impersonation.sql after it has checked a grant and written the log.
+-- Nothing else in the schema knows they exist: the whole feature enters through
+-- current_user_id() and leaves through effective_principals().
+--
+--   fswiki.act_as         a real principal's uuid -- "show me bob's wiki"
+--   fswiki.act_as_groups  a set of group uuids    -- "show me a regular
+--                                                    engineer's wiki"
+--
+-- The second is not the first with a group in it. See docs/impersonation.md:
+-- naming a group as the subject under-reports (a group is in no other groups,
+-- and nobody is in only one group) and over-reports (a deny naming `everyone`
+-- never reaches a group). The set is the unit because membership is.
+
+create or replace function wiki.act_as_groups()
+returns uuid[]
+language sql stable parallel safe as $$
+  select nullif(current_setting('fswiki.act_as_groups', true), '')::uuid[];
+$$;
+
+-- A principal id for a membership that belongs to nobody.
+--
+-- Deliberately derived from the group set rather than random, so that "acted as
+-- {everyone, engineering}" is the same subject in every request and the
+-- impersonation log can be grouped by it.
+--
+-- The version nibble is forced to '0', which gen_random_uuid() -- a v4
+-- generator, so always '4' -- cannot produce. That is what makes "matches no
+-- row in wiki.principal" a property of the value rather than a probability,
+-- and everything downstream depends on it: is_superuser() finds no row,
+-- document.owner_id never matches, draft.author_id never matches. A
+-- hypothetical office worker owns nothing and has no drafts, which is correct
+-- and costs no code.
+create or replace function wiki.synthetic_principal_id(p_groups uuid[])
+returns uuid
+language sql immutable parallel safe as $$
+  select overlay(
+           md5('fswiki:act_as_groups:' ||
+               (select coalesce(string_agg(g::text, ',' order by g), '')
+                  from unnest(p_groups) g))
+           placing '0' from 13 for 1)::uuid;
+$$;
+
+-- The effective principal: what every policy, view and helper resolves against.
+--
+-- One chokepoint on purpose. The mount, the CLI, the preview server and the
+-- renderer all ask this one question, so impersonation needs no client change
+-- and there is nothing for one of them to forget.
+create or replace function wiki.current_user_id()
+returns uuid
+language sql stable security definer parallel safe
+set search_path = wiki, public, pg_temp as $$
+  select coalesce(
+    nullif(current_setting('fswiki.act_as', true), '')::uuid,
+    case when cardinality(coalesce(wiki.act_as_groups(), '{}'::uuid[])) > 0
+         then wiki.synthetic_principal_id(wiki.act_as_groups()) end,
+    wiki.authenticated_user_id());
+$$;
+
 comment on function wiki.current_user_id() is
-  'Principal id of the caller, or NULL when unauthenticated. If you add direct '
-  'libpq clients, resolve them here from current_user rather than the JWT GUC.';
+  'Principal id the request is acting as. Equals authenticated_user_id() unless '
+  'the request is impersonating. Use authenticated_user_id() for anything that '
+  'must name the human: the audit trail, and the impersonation check itself.';
 
 create or replace function wiki.is_superuser(p_user uuid default wiki.current_user_id())
 returns boolean
@@ -50,6 +117,13 @@ $$;
 
 -- The caller, plus every group they belong to, transitively. This is the set of
 -- principals an ACE may name to match them.
+--
+-- The second seed row is the whole of group impersonation. A synthetic
+-- principal has no rows in group_member -- it has no rows anywhere -- so its
+-- memberships come from the GUC instead, and the recursion then expands them
+-- upward by the ordinary rule. Nested groups, deny ACEs and role inheritance
+-- all behave exactly as they do for a person, because from here down nothing
+-- can tell the difference.
 create or replace function wiki.effective_principals(p_user uuid default wiki.current_user_id())
 returns table (principal_id uuid)
 language sql stable security definer parallel safe
@@ -57,6 +131,10 @@ set search_path = wiki, public, pg_temp as $$
   with recursive expanded as (
     select p_user as id
      where p_user is not null
+    union
+    select g as id
+      from unnest(coalesce(wiki.act_as_groups(), '{}'::uuid[])) g
+     where p_user = wiki.synthetic_principal_id(wiki.act_as_groups())
     union
     select gm.group_id
       from wiki.group_member gm

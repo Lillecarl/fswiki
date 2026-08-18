@@ -67,6 +67,8 @@ grant execute on function
     wiki.role_id(text),
     wiki.principal_id(wiki.principal_kind, text),
     wiki.current_user_id(),
+    wiki.authenticated_user_id(),
+    wiki.act_as_groups(),
     wiki.effective_principals(uuid),
     wiki.role_capabilities(uuid),
     wiki.capability_downward(wiki.capability),

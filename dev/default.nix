@@ -107,6 +107,9 @@ let
           export PGRST_SERVER_HOST=127.0.0.1
           export PGRST_SERVER_PORT="$FSWIKI_HTTP_PORT"
           export PGRST_DB_POOL=4
+          # Runs inside every request's transaction, before anything else, and
+          # is the only door into impersonation. See server/sql/100_impersonation.sql.
+          export PGRST_DB_PRE_REQUEST=wiki.pre_request
           export PGRST_OPENAPI_MODE=follow-privileges
           exec postgrest
         '';

@@ -33,6 +33,12 @@ create table wiki.access_event (
   -- edit without guessing.
   open_flags   integer,
 
+  -- Set only when the read happened under impersonation, and never instead of
+  -- principal_id. Filing an admin's impersonated reads against their subject
+  -- would be laundering: the trail must always name the human who caused the
+  -- read, with the identity they borrowed beside it rather than in place of it.
+  acted_as     uuid references wiki.principal(id) on delete set null,
+
   -- The client's claim about the process. Deliberately one jsonb column rather
   -- than columns per field: the shape is the client's, it will change, and
   -- promoting any of it to a first-class column would suggest the server
@@ -63,14 +69,18 @@ alter table wiki.access_event enable row level security;
 
 -- You may see your own trail, and nothing else. Reading everyone's is an
 -- administrative act and belongs to a role that does not serve web requests.
+-- authenticated_user_id(), not current_user_id(): impersonation reproduces
+-- someone's view of the *wiki*, and their access log is not part of it. An
+-- impersonated session reads the actor's own trail, which is also the trail the
+-- impersonation is being written into.
 create policy access_event_select_own on wiki.access_event
-  for select using (principal_id = wiki.current_user_id());
+  for select using (principal_id = wiki.authenticated_user_id());
 
 -- Insert-only, and only about yourself. There is deliberately no update or
 -- delete policy: an audit trail its subject can edit is not one. (They can of
 -- course decline to send anything at all — see the trust note above.)
 create policy access_event_insert_own on wiki.access_event
-  for insert with check (principal_id = wiki.current_user_id());
+  for insert with check (principal_id = wiki.authenticated_user_id());
 
 grant select, insert on wiki.access_event to fswiki_user;
 
@@ -89,7 +99,8 @@ returns integer
 language plpgsql volatile
 set search_path = wiki, public, pg_temp as $$
 declare
-  v_user  uuid := wiki.current_user_id();
+  v_user  uuid := wiki.authenticated_user_id();
+  v_acted uuid := nullif(wiki.current_user_id(), wiki.authenticated_user_id());
   v_added integer;
 begin
   if v_user is null then
@@ -102,10 +113,11 @@ begin
   end if;
 
   insert into wiki.access_event
-    (event_id, principal_id, document_id, path, occurred_at, action,
+    (event_id, principal_id, acted_as, document_id, path, occurred_at, action,
      open_flags, process)
   select (e ->> 'event_id')::uuid,
          v_user,
+         v_acted,
          (e ->> 'document_id')::uuid,
          (e ->> 'path')::ltree,
          (e ->> 'occurred_at')::timestamptz,
@@ -161,7 +173,8 @@ returns table (content text)
 language plpgsql volatile
 set search_path = wiki, public, pg_temp as $$
 declare
-  v_user    uuid := wiki.current_user_id();
+  v_user    uuid := wiki.authenticated_user_id();
+  v_acted   uuid := nullif(wiki.current_user_id(), wiki.authenticated_user_id());
   v_content text;
   v_found   boolean;
 begin
@@ -176,13 +189,19 @@ begin
   -- would otherwise reject a probe for an id that does not exist and take the
   -- read down with it. The path travels in the payload regardless, so a probe
   -- still leaves a mark.
-  if v_user is not null and p_event is not null then
+  -- Under impersonation the transaction is already read only, so there is no
+  -- access event to be had here -- the hook wrote an impersonation_event before
+  -- locking it, which is the record that matters for an impersonated read. The
+  -- read still has to work, so this is a skip rather than a failure.
+  if v_user is not null and p_event is not null
+     and current_setting('transaction_read_only') = 'off' then
     insert into wiki.access_event
-      (event_id, principal_id, document_id, path, occurred_at, action,
+      (event_id, principal_id, acted_as, document_id, path, occurred_at, action,
        open_flags, process)
     values (
       (p_event ->> 'event_id')::uuid,
       v_user,
+      v_acted,
       case when v_found then p_document end,
       (p_event ->> 'path')::ltree,
       coalesce((p_event ->> 'occurred_at')::timestamptz, now()),
