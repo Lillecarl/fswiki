@@ -3,9 +3,11 @@
 Letting a maintainer ask "what does Bob actually see?" and get the true answer,
 rather than a reconstruction of it.
 
-Everything below was measured against the `fswiki-dev` stack with a working
-spike. The spike has been removed; nothing here is committed yet, because one
-decision has a real cost and belongs to whoever maintains this.
+Built, in [100_impersonation.sql](../server/sql/100_impersonation.sql). Every
+number below is measured: 39 assertions in
+[060_impersonation_test.sql](../server/test/060_impersonation_test.sql), and 21
+more against a live PostgREST, because the finding that decides the whole shape
+is something PostgREST does before any SQL of ours runs.
 
 ## Why it is not a convenience
 
@@ -43,9 +45,12 @@ impersonation check itself (so impersonation can never be used to grant more
 impersonation), the audit trail (so reads are filed against the human), and
 anything that refuses to act while impersonating.
 
-Measured: with the spike installed, alice sees 20 documents and bob sees 18.
-Alice acting as bob sees **18** — through the ordinary `syncable_document`
-endpoint, which is what the mount reads.
+Measured over HTTP: dave can mirror 16 documents and bob 17. dave acting as bob
+gets bob's 17 — and not merely 17 of them, but **the same documents, one for
+one**, through the ordinary `syncable_document` path the mount reads. A count
+that matched while the sets differed would be the interesting failure, so the
+test asserts the symmetric difference is empty rather than that the totals
+agree.
 
 ## Read-only, and not by remembering to check
 
@@ -62,14 +67,19 @@ it.
 The database can do it instead:
 
 ```sql
-perform set_config('fswiki.act_as', v_subject::text, true);
-set transaction read only;
+perform set_config('fswiki.act_as', p_subject::text, true);
+perform set_config('transaction_read_only', 'on', true);
 ```
 
-Measured: with that in place, a write during an impersonated request fails with
-`25006 cannot execute INSERT in a read-only transaction`, while the same write
-from the same caller without the header succeeds. Nothing downstream knows
-about impersonation, and nothing has to.
+`set_config` rather than `SET TRANSACTION READ ONLY` only because this runs
+inside a function and after a write; `transaction_read_only` is the flag that
+command sets, and the third argument scopes it to the transaction so the pooled
+connection goes back writable. Measured both: an impersonated `POST /draft`
+fails with `25006`, the same write from the same caller without the header
+succeeds, and an ordinary write on the next request through the same pool is
+unaffected.
+
+Nothing downstream knows about impersonation, and nothing has to.
 
 This is the same shape as the preview server refusing every method but GET
 before routing: a property of the system rather than an inventory of the places
@@ -252,7 +262,7 @@ changes, so an impersonated session is still evaluated as the original human.
 
 ## The finding that decides the shape
 
-**A GET cannot record that it was impersonated.**
+**A request that cannot write cannot record that it was impersonated.**
 
 Impersonation has to leave a trace — an admin reading everyone's private pages
 with no record is precisely the abuse the feature invites. The natural place is
@@ -262,63 +272,151 @@ transaction down:
 
 ```sql
 insert into wiki.impersonation_event (actor_id, subject_id, method, path) ...;
-perform set_config('fswiki.act_as', v_subject::text, true);
-set transaction read only;
+perform set_config('fswiki.act_as', p_subject::text, true);
+perform set_config('transaction_read_only', 'on', true);
 ```
 
-That works, and it cannot be skipped: the statement that grants the
-impersonation is the statement that records it.
+It cannot be skipped, because the statement that grants the impersonation is
+the statement that records it.
 
-It works **on POST**. On GET it does not, because PostgREST has already opened
-a read-only transaction before the hook runs, so the hook's own insert fails
-with `25006`. Measured both ways: an impersonated `POST /rpc/read_document`
-returns `200` and leaves an `impersonation_event`; an impersonated
-`GET /syncable_document` fails outright.
+But it only works where the transaction is read-write, and that is not the
+request's to decide. PostgREST picks the mode before the hook runs, so on a GET
+the hook's own insert fails with `25006` — the same wall
+[audit-trail.md](audit-trail.md) hit from the other side, pointing the same way:
+**a request that records something is not idempotent.**
 
-This is the same wall [audit-trail.md](audit-trail.md) hit, from the other
-side, and it points the same way: **a request that records something is not
-idempotent, and POST is the verb for that.** Impersonation records something.
-It was never a GET either.
+### It is not the verb, it is the volatility
 
-### The decision this leaves
+The obvious guard is "refuse on GET". Measured, that guard is wrong: an
+impersonated `POST /rpc/change_token` is *also* refused, because `change_token`
+is declared `stable` and PostgREST reads the transaction's mode off the
+function's volatility rather than off the method.
 
-Two coherent positions, and the difference is real work:
+A check on the method would have looked correct and passed review, and would
+have failed later as a bare `25006` on an endpoint that looked like it should
+work. So the hook asks the question it actually means:
 
-**A. Impersonation is POST-only.** A GET carrying the header is refused with a
-clear message. Every impersonated read is therefore logged, without exception.
-The cost: the mount reads its manifest and drafts over GET, so supporting an
-impersonated mount means POST equivalents for those — the same shape as
-`read_document`, so it is known work rather than new design. The preview server
-and `fswiki render` already read through paths that can be POST.
+```sql
+if current_setting('transaction_read_only') = 'on' then
+  raise exception 'impersonation cannot be recorded in a read-only transaction'
+    using errcode = 'insufficient_privilege',
+          hint = 'Use the POST endpoints; a GET cannot write its own log.';
+end if;
+```
 
-**B. Impersonation works on GET, unlogged.** No new endpoints. The trace is
-then only what a client volunteers, and the client here is the admin's own
-machine — which [audit-trail.md](audit-trail.md) already explains is not
-evidence. This makes the feature cheap and its accountability decorative.
+This is the same move as `set transaction read only` itself: test the property,
+never enumerate the cases that have it.
 
-**Recommendation: A.** The whole justification for building impersonation is
-that a maintainer needs it; the whole risk is that it reads everyone's private
-pages. Those are the same act, and the only thing separating them is the
-record. A version that cannot log itself is the one that will be objected to,
-correctly, the first time anyone asks who looked at what.
+### The decision this took
 
-An unlogged escape hatch is also hard to withdraw later, whereas the POST
-endpoints are additive and can land incrementally: preview and `render` first,
-where the value is highest and the plumbing already exists, and the mount when
-someone actually wants an impersonated filesystem.
+Two coherent positions were open, and **A** is the one implemented:
+
+**A. Impersonation requires a transaction that can log it.** A GET — or a
+`stable` RPC — carrying the header is refused with a reason. Every impersonated
+read is therefore logged, without exception. The cost is that every read the
+clients do over GET needs a volatile RPC equivalent.
+
+**B. Impersonation works on GET, unlogged.** No new endpoints, and the trace
+becomes only what a client volunteers — where the client is the admin's own
+machine, which [audit-trail.md](audit-trail.md) already explains is not
+evidence. Cheap, with decorative accountability.
+
+The justification for building impersonation and the risk of building it are
+the same act; the only thing separating them is the record. An unlogged escape
+hatch would also be hard to withdraw once anything depended on it.
+
+So: A, and the cost was paid rather than deferred. Four functions —
+`list_documents()`, `document_at()`, `list_drafts()` and `acting_as()` — say in
+SQL exactly what the GETs they mirror say, being `security invoker` over the
+same views. They return `setof` a view, so PostgREST's `?select=` still works
+and the client asks for the same columns down either path.
+
+`volatile` here is not a fib told to obtain a transaction mode. Under
+impersonation these functions' results genuinely depend on a GUC set part-way
+through the transaction, which is what volatile means; `stable` would be the
+inaccurate label.
+
+Measured: `POST /rpc/list_documents` and `GET /syncable_document` return the
+same paths for the same caller, which is the property that would have to hold
+for the pair to be one read rather than two answers.
+
+## Using it
+
+The hook is the only door:
+
+```
+alter role fswiki_authenticator set pgrst.db_pre_request = 'wiki.pre_request';
+notify pgrst, 'reload config';
+```
+
+and then two headers, by name rather than by uuid, because this is a
+maintainer's tool and nobody types uuids:
+
+```
+Fswiki-Act-As:        bob
+Fswiki-Act-As-Groups: everyone,engineering
+```
+
+Sending both is an error rather than a precedence rule — a precedence rule is a
+thing to be wrong about at three in the morning. An unresolvable name raises,
+rather than acting as nobody, which would look indistinguishable from the
+feature working.
+
+The CLI carries them on any command:
+
+```
+fswiki --as bob preview
+fswiki --as-group everyone --as-group engineering render engineering/onboarding
+```
+
+`--as-group` is repeatable and is meant to be repeated. Naming one group is the
+degenerate case the measurements above say is wrong in both directions, so the
+help text says to name every group a real member would be in.
+
+Nothing in the CLI refuses to write while impersonating, and nothing should:
+`fswiki --as bob push` reaches the server and comes back `25006`. A client-side
+check would be a second implementation of a rule the server already enforces,
+and the second implementation is the one that drifts.
+
+### Saying so, on every page
+
+`fswiki preview --as` puts a band across the top of every page. This is not
+decoration. The failure mode of impersonation is forgetting you are doing it,
+and a wiki with a few things missing looks exactly like a wiki that has lost a
+few things. A status screen someone has to think to visit would be no help,
+because the whole problem is not thinking to.
+
+The wording is `viewing as a member of everyone, engineering`, not `viewing as
+engineering` — for the same reason the model uses a set. Saying "as
+engineering" would name the thing this design exists to distinguish itself
+from.
 
 ## The audit trail under impersonation
 
-`access_event.principal_id` currently comes from `current_user_id()`. Under
-impersonation that files the admin's reads against their subject, which is
-laundering. It must become `authenticated_user_id()`, with the impersonated
-identity in a separate `acted_as` column.
+`access_event.principal_id` used to come from `current_user_id()`. Under
+impersonation that would have filed an admin's reads against their subject,
+which is laundering — and the trail is the one table where that matters most,
+because it is the one people trust. It now comes from
+`authenticated_user_id()`, with `acted_as` beside it rather than in place of
+it. The row always names the human who caused the read.
 
-Note that the read-only lockdown blocks `read_document`'s in-band audit insert
-as well, so under impersonation the access event has to come from the hook's
-own pre-lockdown write, or not at all. That is another argument for the hook
-being the thing that logs: it is the only code that runs while the transaction
-can still write.
+The `select` and `insert` policies on `access_event` moved to
+`authenticated_user_id()` for the same reason, which has a consequence worth
+stating: **an impersonated session reads the actor's own trail, not the
+subject's.** Impersonation reproduces someone's view of the wiki, and their
+access log is not part of the wiki.
+
+There is one more consequence, and it is a design constraint rather than a
+wart. The read-only lockdown blocks `read_document`'s in-band audit insert too,
+so an impersonated read writes no `access_event` at all — it writes an
+`impersonation_event`, from the hook, before the lock. That is the right record
+for it: what happened was an impersonation, and filing it a second time as an
+ordinary read by a person who was not reading would be the laundering all over
+again. `read_document` therefore *skips* the insert when the transaction is
+read-only rather than failing, so the read still works.
+
+Measured: after an impersonated read, `access_event` is empty and
+`impersonation_event` names dave acting as bob on `/rpc/read_document`.
 
 ## What this closes
 
@@ -337,4 +435,14 @@ filter, which was measured. With `may_impersonate()` there is a rule to apply:
 grant over, and anything else raises.
 
 That turns an accidental disclosure into a governed one, which is the same
-trade the rest of this design makes.
+trade the rest of this design makes. `may_impersonate()` now exists, so the
+rule is available to write; the split into internal and client forms is still
+the work.
+
+One instance of it is already done, because building this ran straight into it.
+The RLS policies on `impersonation_event` need to know whether the caller is a
+superuser, and a policy is evaluated with the *querying* role's privileges — so
+a policy calling `is_superuser(uuid)` would have handed every client a way to
+ask that question about anybody. The policies call `caller_is_superuser()`
+instead, which takes no argument and so has nothing to leak. That is the shape
+the rest of them want.
