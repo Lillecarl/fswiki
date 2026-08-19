@@ -7,6 +7,14 @@ One rule runs through the whole module: **reads come from
 `wiki.syncable_document`, never `wiki.current_document`**. The two differ
 exactly where a deny-sync ACE sits, and `current_document` would hand back
 content the server has said must not be copied to a laptop.
+
+That rule is about *mirroring*, which is what every client here does, and it
+is the default. It is the wrong rule for something that renders a page and
+keeps nothing: denying `sync` is meant to leave a document readable in a
+browser precisely so that every view costs a request the server can log, and a
+reader that went through the sync view could not serve those pages at all.
+`tree="read"` is that reader, and nothing that writes to a local disk may ask
+for it.
 """
 
 from __future__ import annotations
@@ -74,15 +82,39 @@ class Client:
     per request — see `ClientPool`, and pass its transport in here.
     """
 
+    # Which tree this client reads. "sync" is what a mirror sees and is the
+    # default everywhere; "read" is what a browser sees. They differ exactly
+    # where a deny-sync ACE sits, and the server enforces the difference: the
+    # two RPCs below are two separate grants, so asking for the read tree is a
+    # request the server may refuse rather than a decision made here.
+    _TREES = {
+        "sync": ("syncable_document", "list_documents", "read_document"),
+        "read": ("current_document", None, "view_document"),
+    }
+
     def __init__(self, base_url: str, token: str | None, *, timeout: float = 15.0,
                  act_as: str | None = None,
                  act_as_groups: list[str] | None = None,
-                 transport: httpx.AsyncBaseTransport | None = None) -> None:
+                 transport: httpx.AsyncBaseTransport | None = None,
+                 tree: str = "sync") -> None:
+        if tree not in self._TREES:
+            raise ValueError(f"tree must be 'sync' or 'read', not {tree!r}")
+        self.tree = tree
+        self._view, self._list_rpc, self._read_rpc = self._TREES[tree]
         headers = {"Accept": "application/json"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
         if act_as and act_as_groups:
             raise ValueError("act as a person or a membership, not both")
+        if tree == "read" and (act_as or act_as_groups):
+            # Impersonation refuses a read-only transaction so it can always
+            # write its own log, so an impersonated read goes over a volatile
+            # RPC rather than a GET. wiki.list_documents() is that RPC and it
+            # returns setof syncable_document; there is no current_document
+            # equivalent because nothing has needed one. Refused here rather
+            # than at the first manifest(), so the failure names the reason.
+            raise ValueError("the read tree has no impersonated transport yet: "
+                             "wiki.list_documents() returns the sync tree")
         if act_as:
             headers["Fswiki-Act-As"] = act_as
         if act_as_groups:
@@ -194,7 +226,7 @@ class Client:
         directory would cost more requests to save nothing.
         """
         r = await self._reading(
-            "/syncable_document", "list_documents",
+            f"/{self._view}", self._list_rpc,
             params={"select": MANIFEST_COLUMNS, "order": "path"},
         )
         return self._rows(r)
@@ -202,10 +234,12 @@ class Client:
     async def content(self, document_id: str, *, event: dict | None = None) -> bytes:
         """The published body of one document.
 
-        Through `syncable_document`, so a document that is readable but not
-        syncable comes back as no rows rather than as content.
+        Through this client's tree: `syncable_document` by default, so a
+        document that is readable but not syncable comes back as no rows
+        rather than as content, and `current_document` under `tree="read"`,
+        where it comes back as the page it was always meant to be.
 
-        With `event`, the same read goes over `POST /rpc/read_document`, which
+        With `event`, the same read goes over the matching audited RPC, which
         records the access in the transaction that serves the bytes. The verb
         is the point: PostgREST runs GET in a read-only transaction, so a GET
         cannot write its own audit row, and POST can. Visibility is identical —
@@ -222,29 +256,30 @@ class Client:
             # no access event anyway (the hook wrote an impersonation_event
             # instead, which is the truer record of what happened).
             r = await self._http.post(
-                "/rpc/read_document",
+                f"/rpc/{self._read_rpc}",
                 json={"p_document": document_id, "p_event": event},
             )
         else:
             r = await self._http.get(
-                "/syncable_document",
+                f"/{self._view}",
                 params={"select": "content", "id": f"eq.{document_id}"},
             )
         rows = self._rows(r)
         if not rows:
-            raise LookupError(f"document {document_id} is not syncable, or is gone")
+            raise LookupError(
+                f"document {document_id} is not in the {self.tree} tree, or is gone")
         body = rows[0].get("content")
         return b"" if body is None else body.encode("utf-8")
 
     async def document(self, path: str) -> dict | None:
         """One document by path, with its body, or None if it is not there.
 
-        Through `syncable_document` like every other read here, so "not there"
-        and "not yours to mirror" are the same answer — which is the answer a
+        Through this client's tree like every other read here, so "not there"
+        and "not yours" are the same answer — which is the answer a
         renderer wants, since telling them apart is how a link graph leaks.
         """
         r = await self._reading(
-            "/syncable_document", "document_at",
+            f"/{self._view}", "document_at",
             params={"select": "id,path,content,content_type,version",
                     **({} if self.impersonating else {"path": f"eq.{path}"})},
             body={"p_path": path},
