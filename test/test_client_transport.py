@@ -181,41 +181,49 @@ async def test_every_read_still_works_over_the_volatile_transport(granted, clien
 
 
 async def test_the_change_token_is_stable_when_nothing_changes(stack, client):
-    """The property the whole poll design rests on: eleven bytes instead of
+    """The property the whole poll design rests on: a few bytes instead of
     six kilobytes, but only if an unchanged database answers the same way
     twice. See docs/change-notification.md."""
     bob = await client("bob")
     assert len({await bob.change_token() for _ in range(5)}) == 1
 
 
-@pytest.mark.xfail(
-    reason="wiki.changed() returns pg_current_wal_lsn(), and the impersonation "
-           "hook UPDATEs impersonation_event (last_seen_at, requests) on every "
-           "request -- so the token this client sees moves every single poll",
-    strict=True)
 async def test_the_impersonated_change_token_is_stable_too(granted, client):
-    """`wiki.changed()` exists so an impersonated mount can poll cheaply. The
-    SQL says so and calls it "not a nicety": without it a mount refetches the
-    whole manifest every poll, "both a pointless six kilobytes and a steady
-    drip into the log above".
-
-    It does not work, and it cannot: the token is the WAL position, and the
-    hook that authorises the impersonation writes to the log in the same
-    breath. Measured here — five polls with nothing else touching the
-    database give one token for an ordinary client and five distinct tokens
-    for an impersonated one — so the impersonated mount does exactly what the
-    function was added to prevent, and pays an extra round trip per poll to
-    do it.
-
-    Strict xfail: this is a schema fix, not a client one, and 075_changes.sql
-    already names the shape of it — "replace the body with a counter bumped by
-    statement-level triggers on document, document_version, ace, group_member
-    and user_account". A counter over the tables that hold wiki content does
-    not move when the audit log does. The signature stays, so no client
-    changes.
-    """
+    """`wiki.changed()` exists so an impersonated mount can poll cheaply, and
+    for a while it could not: the token was `pg_current_wal_lsn()`, and the
+    hook that authorises the impersonation UPDATEs its session row in the same
+    breath, so the WAL moved on every single poll. An impersonated mount
+    refetched the whole manifest every time and paid an extra round trip to do
+    it. See 075_changes.sql, which is now a counter over the tables that hold
+    what a client can see."""
     as_bob = await client("dave", act_as=granted.who("bob"))
     assert len({await as_bob.change_token() for _ in range(5)}) == 1
+
+
+async def test_the_token_still_moves_when_something_actually_changes(
+        granted, client, stack):
+    """The other half, and the half a broken fix would pass: a token that
+    never moves is cheap and useless. It must be stable *and* still notice."""
+    as_bob = await client("dave", act_as=granted.who("bob"))
+    before = await as_bob.change_token()
+    stack.exec("update wiki.document set title = title "
+               "where path = 'root.engineering.onboarding'")
+    assert await as_bob.change_token() != before
+
+
+async def test_the_audit_trail_was_not_what_paid_for_it(granted, client):
+    """The cheap way to stop the token moving would have been to make the hook
+    write less often, and that would have bought a poll optimisation with the
+    record of who acted as whom. It did not: every impersonated request is
+    still counted, the writes simply no longer look like content changes."""
+    as_bob = await client("dave", act_as=granted.who("bob"))
+    before = granted.count(
+        "select coalesce(sum(requests), 0) from wiki.impersonation_event")
+    for _ in range(5):
+        await as_bob.change_token()
+    after = granted.count(
+        "select coalesce(sum(requests), 0) from wiki.impersonation_event")
+    assert after - before == 5
 
 
 async def test_an_ungranted_impersonation_is_refused_by_the_server(stack, client):

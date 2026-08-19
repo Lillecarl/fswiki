@@ -88,9 +88,10 @@ select wiki_test.expect('change_token returns something',
 
 -- Only equality is meaningful, but it must differ after a write.
 --
--- Each statement below is its own transaction, and that is the point: the WAL
--- position advances when a transaction commits, not while it runs. Sampling
--- both sides inside one DO block sees no movement at all. That is the right
+-- Each statement below is its own transaction, and that is the point: the
+-- counter is bumped inside the writing transaction, so its new value becomes
+-- visible when that transaction commits and not while it runs. Sampling both
+-- sides inside one DO block sees no movement at all. That is the right
 -- behaviour for a change token — it becomes visible exactly when the change
 -- does — but it means this test cannot be written as a single block.
 create temporary table wiki_test_token as select wiki.change_token() as t;
@@ -102,3 +103,55 @@ select wiki_test.expect('change_token moves after a committed write',
   format('before=%s after=%s', (select t from wiki_test_token), wiki.change_token()));
 
 drop table wiki_test_token;
+
+-- The invariant the counter exists for: writing down that somebody read
+-- something is not a change to what anybody can read. If either of these ever
+-- moves the token, an impersonated mount is back to refetching the whole
+-- manifest on every poll -- because the impersonation hook writes one of them
+-- on every impersonated request.
+--
+-- The ids are minted up front so the rows can be removed again afterwards; the
+-- files after this one count what is in these tables.
+create temporary table wiki_test_token as
+  select wiki.change_token() as t,
+         gen_random_uuid()   as probe_event,
+         gen_random_uuid()   as probe_session;
+
+insert into wiki.access_event (event_id, document_id, principal_id, action,
+                               occurred_at)
+select (select probe_event from wiki_test_token), d.id, p.id, 'open', now()
+  from wiki.document d, wiki.principal p
+ where d.path = 'root.public.welcome' and p.name = 'bob';
+
+insert into wiki.impersonation_event (id, actor_id, subject_id)
+select (select probe_session from wiki_test_token), a.id, s.id
+  from wiki.principal a, wiki.principal s
+ where a.name = 'dave' and s.name = 'bob';
+
+-- The session bump specifically: one UPDATE per impersonated request, and the
+-- write that used to move the token every single time.
+update wiki.impersonation_event
+   set requests = requests + 1, last_seen_at = now()
+ where id = (select probe_session from wiki_test_token);
+
+select wiki_test.expect('the audit trail does not move the change token',
+  wiki.change_token() is not distinct from (select t from wiki_test_token),
+  format('before=%s after=%s', (select t from wiki_test_token), wiki.change_token()));
+
+delete from wiki.access_event
+ where event_id = (select probe_event from wiki_test_token);
+delete from wiki.impersonation_event
+ where id = (select probe_session from wiki_test_token);
+drop table wiki_test_token;
+
+-- And fswiki_user must not be able to move it by hand. The token is only worth
+-- polling if it means what it says.
+select wiki_test.expect_eq('fswiki_user may read the counter',
+  has_table_privilege('fswiki_user', 'wiki.change_counter', 'select'),
+  true);
+
+select wiki_test.expect_eq('fswiki_user may not write the counter',
+  has_table_privilege('fswiki_user', 'wiki.change_counter', 'update')
+    or has_table_privilege('fswiki_user', 'wiki.change_counter', 'insert')
+    or has_table_privilege('fswiki_user', 'wiki.change_counter', 'delete'),
+  false);
