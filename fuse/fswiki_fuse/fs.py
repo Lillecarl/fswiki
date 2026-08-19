@@ -131,7 +131,7 @@ class FswikiFs(pyfuse3.Operations):
         # What the kernel is told it may cache for.
         self._ttl = ttl
         # How often we are willing to ask the server anything at all. Defaults
-        # to the kernel TTL, but can be shorter: a poll is eleven bytes, so
+        # to the kernel TTL, but can be shorter: a poll is a few bytes, so
         # checking more often than the kernel asks is nearly free.
         self._poll = ttl if poll is None else poll
         self._read_only = read_only or principal_id is None
@@ -190,7 +190,7 @@ class FswikiFs(pyfuse3.Operations):
         * `ttl` is what the *kernel* is told, so most operations never reach us
           at all;
         * `poll` is how often we ask the server anything, and what we ask is
-          `change_token()` — eleven bytes — not the six-kilobyte manifest.
+          `change_token()` — a few bytes — not the six-kilobyte manifest.
 
         So the steady state for an idle mount is one tiny request every `poll`
         seconds, and a manifest fetch only when someone actually wrote
@@ -707,7 +707,7 @@ class FswikiFs(pyfuse3.Operations):
             # gets that wrong in both directions: it can miss our own push and
             # invent a conflict, and it is the stale number an unread blind
             # overwrite would otherwise claim to descend from. Saves are rare
-            # next to reads, and the check is eleven bytes unless the wiki has
+            # next to reads, and the check is a few bytes unless the wiki has
             # actually moved.
             self._checked_at = float("-inf")
             fresh = (await self._current()).get(node.key)

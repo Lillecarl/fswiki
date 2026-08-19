@@ -145,7 +145,7 @@ rather than the shipped 5 and 2. `--ttl` is how long the kernel may answer a
 lookup without asking the mount at all, so at 5 seconds every "has it noticed
 yet?" costs up to five seconds of stale cache — the merge tests, which are
 nothing but that question, were two thirds of the suite's wall clock. Serving a
-getattr from the tree we already hold is free, and a poll is eleven bytes.
+getattr from the tree we already hold is free, and a poll is a few bytes.
 
 **Never sleep; wait for the thing.** The mount polls, the audit shipper
 batches, PostgREST loads a schema cache. `wait_for()` polls a predicate and

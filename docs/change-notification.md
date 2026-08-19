@@ -40,8 +40,14 @@ polls that and only re-fetches the manifest when it differs.
 | change token | **11 B** | 884 ms |
 | full manifest | 6053 B | 22 855 ms |
 
+(Measured against the first implementation below, whose token was a WAL
+position. The one that replaced it is a decimal counter and slightly smaller;
+the round-trip cost is the same, and it is the round trip that dominates.)
+
 **26x faster and 550x less data.** That is what makes a 1-second poll interval
 reasonable where a 5-second manifest refresh was not.
+
+### The first answer, and why it was wrong
 
 `pg_current_wal_lsn()` works as the token with no schema change at all —
 `fswiki_user` can already execute it, and it advances on any write to the
@@ -53,10 +59,53 @@ change. That is the right direction to be wrong in.
     returns text language sql stable parallel safe as
     $$ select pg_current_wal_lsn()::text $$;
 
-If the false positives ever matter, replace the body with a counter bumped by
-statement-level triggers on `document`, `document_version`, `ace`,
-`group_member` and `user_account` — everything that can change what a caller
-sees. Same signature, so no client changes.
+That is what shipped, and it failed for exactly the client that needed a cheap
+poll most. **The impersonation hook writes on every impersonated request.** It
+collapses a session into one row rather than logging each request separately,
+but collapsing still means an `UPDATE` of `last_seen_at` and `requests`, in the
+same transaction that serves the read. So the WAL advanced on every poll, and
+the token an impersonated client got back was different every time.
+
+Measured — five polls, nothing else touching the database:
+
+| | distinct tokens in five polls |
+| --- | --- |
+| ordinary client | **1** |
+| impersonated client | **5** |
+
+An impersonated mount therefore refetched the whole manifest on every tick,
+which is precisely what `wiki.changed()` was added to prevent, and paid an
+extra round trip per tick to do it. Nothing looked broken: the token is opaque,
+and a client that refetches too often still shows the right thing.
+
+### What it is now
+
+A counter, bumped by statement-level triggers on the tables that hold what a
+client can see — `document`, `document_version`, `draft`, `ace`, `principal`,
+`user_account`, `group_member`, and the role tables. Same signature, so no
+client changed.
+
+Two things about it are load-bearing.
+
+**It is a table, not a sequence.** A sequence's value is visible the moment
+`nextval` runs, *before* the writing transaction commits. A client polling in
+that window would see a new token, refetch the old data, and then never refetch
+again because the token had stopped moving. That is a missed change, and a
+missed change is the one thing this must never do. A row updated inside the
+transaction becomes visible when the transaction does — the same property the
+WAL position had, and the reason the WAL position was a reasonable first
+answer.
+
+**The audit trail is not what paid for it.** The cheap fix would have been to
+make the hook write less often — debounce `last_seen_at`, approximate the
+request count — and that buys a poll optimisation with the record of who acted
+as whom. Excluding `access_event` and `impersonation_event` from the triggers
+costs nothing instead: writing down that somebody read something does not
+change what anybody can read.
+
+The price is that every write transaction takes a row lock on one row and so
+serialises against every other write transaction. Reads never touch it, and the
+writes are pushes and draft saves.
 
 **A global token is sound even though visibility is per-user.** If nothing
 changed for anyone, nothing changed for you. The reverse — a token that moved

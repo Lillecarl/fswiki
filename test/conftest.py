@@ -570,7 +570,7 @@ def mount_factory(stack, tmp_path_factory):
         # cache -- and the merge tests, which are nothing but that question,
         # took two thirds of the suite's wall clock waiting for it. Serving a
         # getattr from the tree we already hold is free; only `poll` decides how
-        # often the server is asked anything -- and a poll is eleven bytes, so
+        # often the server is asked anything -- and a poll is a few bytes, so
         # four a second costs less than one manifest fetch would.
         base = tmp_path_factory.mktemp("mnt")
         log = base.parent / f"{base.name}.log"

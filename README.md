@@ -145,8 +145,9 @@ measurements that settled them.
   rather than the HTTP verb.
 - [docs/audit-trail.md](docs/audit-trail.md) — what the server knows by itself,
   and what is only ever a claim by software the user controls.
-- [docs/change-notification.md](docs/change-notification.md) — eleven bytes
-  against six kilobytes, and why a notification bridge must never carry content.
+- [docs/change-notification.md](docs/change-notification.md) — a few bytes
+  against six kilobytes, why the obvious token was wrong, and why a
+  notification bridge must never carry content.
 
 ## Status
 

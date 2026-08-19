@@ -72,7 +72,7 @@ Three details make it hold up against real editors:
   mount only learns of it from the manifest. The tip's author separates the
   cases exactly: if you published it, your copy *is* that revision. Saves
   therefore bypass the poll window before deciding, which costs one
-  `change_token()` — eleven bytes — unless the wiki has actually moved.
+  `change_token()` — a few bytes — unless the wiki has actually moved.
 
 ### Scratch files
 
