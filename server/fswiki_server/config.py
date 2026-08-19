@@ -22,6 +22,21 @@ from pathlib import Path
 # between versions and quietly stop excluding anybody.
 MIGRATION_LOCK = 0x6673776_96B690001
 
+# How a PostgREST is told its schema cache is stale.
+#
+# PostgREST builds the cache when it connects and does not notice DDL, so the
+# runtime rebuild has to say so. A signal only reaches a child; a notification
+# reaches every instance connected to the database, whoever started it -- a
+# rolling deploy's other half, a `fswiki-dev` someone left running, or a person
+# applying the schema by hand from psql.
+#
+# Both ends are named here because they have to be the same two strings in two
+# places, and a channel that matches at only one end is a silence rather than
+# an error. These are PostgREST's own defaults; setting them explicitly is what
+# stops a default moving under us.
+PGRST_CHANNEL = "pgrst"
+PGRST_RELOAD_SCHEMA = "reload schema"
+
 
 class ConfigError(Exception):
     """Something required is missing, said in a way that names the fix."""

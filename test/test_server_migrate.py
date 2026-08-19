@@ -20,8 +20,9 @@ import threading
 import psycopg
 import pytest
 
-from conftest import ROOT
-from fswiki_server.config import MIGRATION_LOCK, Config, ConfigError
+from conftest import ROOT, free_port, http, wait_for
+from fswiki_server.config import (MIGRATION_LOCK, PGRST_CHANNEL,
+                                  PGRST_RELOAD_SCHEMA, Config, ConfigError)
 from fswiki_server.migrate import (TRACKS, MigrationError, migrate,
                                    schema_files)
 
@@ -373,3 +374,115 @@ def test_a_database_from_before_the_ledger_is_baselined(blank, stack):
     # usable rather than merely recorded.
     with psycopg.connect(blank.database_url, autocommit=True) as c:
         assert c.execute("select count(*) from wiki.role").fetchone()[0] == 7
+
+# --- telling the servers we did not start -----------------------------------
+#
+# A rebuild drops and replays every function, and a PostgREST that connected
+# before it keeps a cache built from objects that no longer exist. The symptom
+# is the worst kind: PGRST202 "could not find the function in the schema cache"
+# for a function that plainly exists in psql, on the one server nobody thought
+# to restart.
+#
+# A signal only reaches a child. The notification reaches whoever is connected.
+
+CANARY = """
+create or replace function wiki.reload_canary()
+returns integer language sql stable as $$ select 42 $$;
+grant execute on function wiki.reload_canary() to fswiki_anon;
+"""
+
+
+def _postgrest_on(stack, db: str, port: int, log_path) -> subprocess.Popen:
+    """A PostgREST against `db` that this process cannot signal from the server.
+
+    Deliberately not `fswiki_server.postgrest.Postgrest`. The point of the test
+    below is an instance the migrating code has no handle on, which is what the
+    other half of a rolling deploy and a stray `fswiki-dev` both are.
+    """
+    import os
+    env = dict(os.environ)
+    env.update(
+        PGRST_DB_URI=f"postgres://fswiki_authenticator@127.0.0.1:{stack.pg_port}/{db}",
+        PGRST_DB_SCHEMAS="wiki",
+        PGRST_DB_ANON_ROLE="fswiki_anon",
+        PGRST_SERVER_HOST="127.0.0.1",
+        PGRST_SERVER_PORT=str(port),
+        PGRST_DB_PRE_REQUEST="wiki.pre_request",
+    )
+    log = open(log_path, "a")
+    proc = subprocess.Popen(["postgrest"], env=env, stdout=log, stderr=log)
+
+    def up():
+        if proc.poll() is not None:
+            raise AssertionError("postgrest exited: " + log_path.read_text())
+        # 200 on the root and not merely a socket: PostgREST accepts
+        # connections while the cache is still loading and 503s everything.
+        try:
+            return http(f"http://127.0.0.1:{port}/", timeout=2).code == 200
+        except OSError:
+            return False
+
+    wait_for(up, timeout=30, what=f"a second postgrest on {port}")
+    return proc
+
+
+def test_the_channel_and_the_payload_are_what_postgrest_listens_for():
+    """Both ends have to be the same two strings, and a channel that matches at
+    only one end is a silence rather than an error."""
+    from fswiki_server.postgrest import environment
+    env = environment(Config(database_url="postgres:///x", schema_dir=SCHEMA))
+    assert env["PGRST_DB_CHANNEL"] == PGRST_CHANNEL
+    assert env["PGRST_DB_CHANNEL_ENABLED"] == "true"
+    assert PGRST_RELOAD_SCHEMA == "reload schema"
+
+
+def test_a_postgrest_we_did_not_start_hears_about_a_rebuild(copied, stack, tmp_path):
+    """The hole the notification exists to close.
+
+    This PostgREST is not a child of anything the server owns, so SIGUSR1 is
+    not available to it. It has to learn from the database itself."""
+    migrate(copied)
+    port = free_port()
+    proc = _postgrest_on(stack, "fswiki_migrate_test", port, tmp_path / "other.log")
+    url = f"http://127.0.0.1:{port}/rpc/reload_canary"
+    try:
+        assert http(url, method="POST", body={}).code == 404, (
+            "expected the canary to be absent before it is added")
+
+        (copied.schema_dir / "runtime" / "940_canary.sql").write_text(CANARY)
+        migrate(copied)
+
+        # Asynchronous: migrate() returns once the notification is queued, so
+        # poll rather than assume the reload landed before the next request.
+        def reloaded():
+            r = http(url, method="POST", body={})
+            return r if r.code == 200 else None
+
+        assert wait_for(reloaded, what="the other server to reload").body.strip() == "42"
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_a_rebuild_that_fails_tells_nobody_to_reload(copied):
+    """NOTIFY is held until commit and discarded on rollback, which is the
+    semantics wanted: a migration that failed must not send anyone looking for
+    objects it did not create."""
+    migrate(copied)
+    with psycopg.connect(copied.database_url, autocommit=True) as listener:
+        listener.execute(f"listen {PGRST_CHANNEL}")
+        (copied.schema_dir / "runtime" / "940_canary.sql").write_text(
+            "this is not sql;\n")
+        with pytest.raises(MigrationError):
+            migrate(copied)
+        listener.execute("select 1")
+        assert list(listener.notifies(timeout=1, stop_after=1)) == []
+
+
+def test_a_rebuild_that_works_says_so_on_the_channel(copied):
+    migrate(copied)
+    with psycopg.connect(copied.database_url, autocommit=True) as listener:
+        listener.execute(f"listen {PGRST_CHANNEL}")
+        migrate(copied)
+        got = list(listener.notifies(timeout=10, stop_after=1))
+    assert [n.payload for n in got] == [PGRST_RELOAD_SCHEMA]

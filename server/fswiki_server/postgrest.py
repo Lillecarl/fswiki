@@ -3,8 +3,15 @@
 The second startup phase. It is a child rather than a sibling under a process
 supervisor for one concrete reason: **the schema cache**. PostgREST builds it
 when it connects and does not notice DDL afterwards, so the process that
-changes the schema has to be able to tell it. As a child, that is a signal;
-as a sibling, it is a NOTIFY channel, a shared secret and a race.
+changes the schema has to be able to tell it, and being its parent makes that
+a signal.
+
+A signal is not the whole answer, though, and it is worth being clear about
+which half it is. It reaches the instance we own and nothing else. Every other
+PostgREST on the same database -- the other half of a rolling deploy, a
+`fswiki-dev` someone left running -- hears about a rebuild over the `pgrst`
+notification channel instead, which `migrate()` writes to inside the migration
+transaction. See config.PGRST_CHANNEL.
 
 It is not proxied. The CLI and the FUSE mount talk to PostgREST directly, so
 it binds an address of its own and this process only owns its lifetime.
@@ -24,7 +31,7 @@ import time
 import urllib.error
 import urllib.request
 
-from .config import Config
+from .config import PGRST_CHANNEL, Config
 
 log = logging.getLogger(__name__)
 
@@ -54,6 +61,12 @@ def environment(config: Config) -> dict[str, str]:
         # the only door into impersonation. See 100_impersonation.sql.
         "PGRST_DB_PRE_REQUEST": "wiki.pre_request",
         "PGRST_OPENAPI_MODE": "follow-privileges",
+        # How an instance hears that the schema moved. Both are PostgREST's
+        # own defaults; they are set anyway because the notification at the
+        # end of migrate() is the only thing that reaches an instance we did
+        # not start, and a default that moves would break it in silence.
+        "PGRST_DB_CHANNEL": PGRST_CHANNEL,
+        "PGRST_DB_CHANNEL_ENABLED": "true",
     })
     if config.postgrest_jwt_secret:
         env["PGRST_JWT_SECRET"] = config.postgrest_jwt_secret
@@ -136,6 +149,13 @@ class Postgrest:
         runtime half of a two-track migration does on every deploy -- has to
         follow them with this. Being its parent is what makes that a method
         call rather than a NOTIFY on a channel configured at both ends.
+
+        Startup does not need it. The phases run migrate, then start, then
+        serve, so this process's PostgREST connects after the schema has
+        stopped moving and builds a cache of the new shape. This is for a
+        rebuild that happens while we are already serving, and it is the
+        cheaper of the two paths: synchronous, and not dependent on the
+        notification channel being enabled at either end.
 
         **SIGUSR1, not SIGUSR2.** PostgREST reloads its schema cache on the
         first and its configuration on the second, which is the opposite way

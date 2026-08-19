@@ -28,13 +28,39 @@ Three phases, in that order, and the order is the program:
    `runtime/` and `seed/` whatever state it was in, all inside one transaction
    so there is no instant at which the schema is half of one version and half
    of another. A session-level advisory lock means two servers starting at once
-   wait rather than race.
+   wait rather than race. The transaction ends with
+   `notify pgrst, 'reload schema'`; see below.
 2. **start PostgREST** — as a child process, and it does not return until
    PostgREST answers. It is a child because PostgREST builds its schema cache
    on connect and never notices DDL, so whatever changes the schema has to be
    able to signal it. That signal is **SIGUSR1**; SIGUSR2 reloads the config
    and silently does nothing useful here.
 3. **serve** — uvicorn over an ASGI application of about eighty statements.
+
+### Telling the servers we did not start
+
+Phase 1 finishing before phase 2 begins protects **our** PostgREST and nothing
+else. Every other instance on the same database — the other half of a rolling
+deploy, a `fswiki-dev` someone left running, a person applying the schema from
+psql — still holds a cache built from 54 functions that have since been dropped
+and recreated. It does not notice, and the symptom is the worst kind: `PGRST202
+Could not find the function … in the schema cache` for a function that plainly
+exists in psql, on the one server nobody thought to restart.
+
+A signal only reaches a child, so the general mechanism is the notification
+channel PostgREST listens on. `migrate()` writes to it **inside** the migration
+transaction, because PostgreSQL holds a NOTIFY until commit and discards it on
+rollback — which is exactly right, since a migration that failed must not send
+anybody looking for objects it did not create.
+
+The channel and the payload are named once, in `config.py`, and set explicitly
+on PostgREST rather than left to its defaults: a channel that matches at only
+one end is a silence rather than an error.
+
+It is asynchronous. `migrate()` returns as soon as the notification is queued,
+so a deploy that switches traffic immediately has a window in which another
+instance still answers from the old cache. Usually invisible, because a rebuild
+recreates the same signatures; it shows only for something genuinely new.
 
 PostgREST binds an address of its own and is not proxied: the CLI and the FUSE
 mount talk to it directly. This program only owns its lifetime.

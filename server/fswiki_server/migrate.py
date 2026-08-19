@@ -48,7 +48,7 @@ from pathlib import Path
 
 import psycopg
 
-from .config import MIGRATION_LOCK, Config
+from .config import MIGRATION_LOCK, PGRST_CHANNEL, PGRST_RELOAD_SCHEMA, Config
 
 log = logging.getLogger(__name__)
 
@@ -239,6 +239,27 @@ def migrate(config: Config) -> Migration:
             _run(conn, path)
         for path in tracks["seed"]:
             _run(conn, path)
+
+        # Tell every PostgREST on this database that the runtime half moved.
+        #
+        # Inside the transaction on purpose. PostgreSQL holds a NOTIFY until
+        # commit and discards it on rollback, which is exactly right: a
+        # migration that failed must not tell anybody to reload.
+        #
+        # A channel and not a signal, because a signal only reaches a child.
+        # This is the path to the instances we do not own -- the other half of
+        # a rolling deploy, a `fswiki-dev` left running, someone applying the
+        # schema from psql -- and their symptom without it is the worst kind:
+        # PGRST202 "could not find the function in the schema cache" for a
+        # function that plainly exists in psql.
+        #
+        # It is asynchronous. This returns as soon as the notification is
+        # queued, so a deploy that switches traffic immediately has a window in
+        # which another instance still answers from the old cache. Usually
+        # invisible, because a rebuild recreates the same signatures; it shows
+        # only for something genuinely new.
+        conn.execute("select pg_notify(%s, %s)",
+                     (PGRST_CHANNEL, PGRST_RELOAD_SCHEMA))
 
         # One transaction over the drop and the replay, so there is no instant
         # at which the schema is half of one version and half of another --
