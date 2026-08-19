@@ -164,3 +164,16 @@ def test_answers_says_no_rather_than_raising_when_nothing_is_there():
     needs 'not yet' and a caller checking health needs 'no'; conflating them
     turns a server that never started into a server that returned an error."""
     assert answers(f"http://127.0.0.1:{free_port()}/", timeout=0.5) is False
+
+
+def test_a_postgrest_that_is_not_installed_says_which_binary(stack):
+    """The commonest deployment mistake. A bare FileNotFoundError out of Popen
+    names the binary without saying what wanted it or how to fix it."""
+    cfg = Config(
+        database_url=f"postgres://postgres@127.0.0.1:{stack.pg_port}/fswiki",
+        schema_dir=SCHEMA,
+        postgrest_bin="postgrest-that-is-not-installed",
+        postgrest_port=free_port(),
+    )
+    with pytest.raises(PostgrestError, match="FSWIKI_POSTGREST_BIN"):
+        Postgrest(cfg).start(timeout=5)

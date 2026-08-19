@@ -97,7 +97,7 @@ let
         covdir=$(mktemp -d)
         trap 'rm -rf "$covdir"' EXIT
         echo 'import coverage; coverage.process_startup()' > "$covdir/sitecustomize.py"
-        printf '[run]\nparallel = true\nsource_pkgs = fswiki_core, fswiki_cli, fswiki_fuse\ndata_file = %s/.coverage\n' \
+        printf '[run]\nparallel = true\nsource_pkgs = fswiki_core, fswiki_cli, fswiki_fuse, fswiki_server\ndata_file = %s/.coverage\n' \
           "$covdir" > "$covdir/coveragerc"
         export PYTHONPATH="$covdir:${coverageEnv}/${pkgs.python3.sitePackages}:$PYTHONPATH"
         export COVERAGE_PROCESS_START="$covdir/coveragerc"

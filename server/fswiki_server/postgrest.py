@@ -105,8 +105,15 @@ class Postgrest:
         if self.running:
             raise PostgrestError("already started")
         log.info("starting postgrest on %s", self.url)
-        self._proc = subprocess.Popen(
-            [self._config.postgrest_bin], env=environment(self._config))
+        try:
+            self._proc = subprocess.Popen(
+                [self._config.postgrest_bin], env=environment(self._config))
+        except OSError as exc:
+            # The commonest deployment mistake, and a bare FileNotFoundError
+            # from Popen names the binary without saying what wanted it.
+            raise PostgrestError(
+                f"cannot run {self._config.postgrest_bin!r}: {exc}. "
+                f"Set FSWIKI_POSTGREST_BIN, or put postgrest on PATH") from exc
 
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:

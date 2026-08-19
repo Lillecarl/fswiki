@@ -44,7 +44,7 @@ The mount tests are marked, and they are marked precisely so that this works.
 
     nix build --file . tests.check -L
 
-450 tests, about twenty seconds, entirely inside a pure Nix build. That is
+505 tests, about forty seconds, entirely inside a pure Nix build. That is
 every pure unit below, plus the client, the SQL suite, the audit trail over
 HTTP and impersonation over HTTP. Two skip themselves there: the filesystem
 under the build's `$TMPDIR` may not carry user extended attributes, and
@@ -97,6 +97,10 @@ Then against a live stack:
 | `test_audit.py` | the access trail over HTTP |
 | `test_impersonation.py` | `--as` / `--as-group` over HTTP |
 | `test_public.py` | what a request with no token at all can reach |
+| `test_server_migrate.py` | the schema load, and the lock that makes it repeatable |
+| `test_server_postgrest.py` | PostgREST as a child process, and its reload signal |
+| `test_server_app.py` | the browser-facing server, driven over ASGI |
+| `test_server_main.py` | `fswiki-serve`'s flags and its exit codes |
 | `test_cli.py` | `fswiki` — status, diff, push, revert, render |
 | `test_cli_impersonation.py` | `fswiki --as`, including that it cannot write |
 | `test_preview.py` | `fswiki preview` |
