@@ -25,6 +25,12 @@ let
     ps.anyio
     ps.trio
     ps.pytest-xdist
+    ps.pytest-cov
+    # For fswiki_fuse.inodes, which is a dict, a Counter and the kernel's
+    # lookup-count protocol -- and imports pyfuse3 for one constant. Importing
+    # it does not open /dev/fuse, so it works in the sandbox; only mounting
+    # needs the device.
+    ps.pyfuse3
     fswiki-core
     ps.httpx
     ps.nh3
