@@ -8,9 +8,25 @@
 -- A folder is visible either because you may read it outright, or because it
 -- holds something you may read. Without the second arm the tree comes back
 -- disconnected and the mount is unusable. See wiki.can_traverse().
+--
+-- The sub-SELECT is the whole performance of reading this wiki, and it looks
+-- like a mistake. It is not: `(select f())` with nothing correlated in it is an
+-- InitPlan, which PostgreSQL evaluates **once per statement**. Written as a
+-- bare `wiki.acl_context('read')` it would be a per-row call, and the caller's
+-- ACL would be re-derived for every document in the answer -- which is what
+-- this replaced. Measured on 1,021 documents: 494 us per document before, 6.1
+-- us after. See wiki.acl_context() and issue #10.
+--
+-- The traversal arm still calls wiki.can_traverse(), whose signature and
+-- grants are unchanged. It builds a context of its own, once per call, and
+-- pays the same 14 us per descendant -- see the end of 040_authz.sql. Keeping
+-- it out of the policy expression keeps a context-taking function out of
+-- reach of a client, which matters: this one reads the tree, so a forged
+-- context would turn it into an existence oracle over paths.
 create policy document_select on wiki.document
   for select using (
-    wiki.can(path, is_folder, owner_id, 'read')
+    wiki.can_ctx(path, is_folder, owner_id, 'read',
+                 (select wiki.acl_context('read')))
     or (is_folder and wiki.can_traverse(path, 'read'))
   );
 

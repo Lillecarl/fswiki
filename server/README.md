@@ -146,7 +146,7 @@ no way to create one that is not, so the revoke has to run after the final
 | `020_rbac.sql` | capabilities, roles, role inheritance |
 | `030_documents.sql` | documents, versions, drafts, path maintenance |
 | `035_acl.sql` | access control entries |
-| `040_authz.sql` | identity, capability closures, the ACL walk, `has_capability()` |
+| `040_authz.sql` | identity, capability closures, the ACL walk, `has_capability()`, and the per-statement `acl_context` the read policies use |
 | `050_rls.sql` | the policies, and which tables have RLS enabled |
 | `060_roles.sql` | database roles for PostgREST, and every grant |
 | `070_views.sql` | `current_document`, `syncable_document`, `document_as_of()` |

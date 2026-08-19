@@ -145,11 +145,34 @@ select wiki_test.expect_eq('anon may execute exactly the self-only forms',
      from pg_proc p join pg_namespace n on n.oid = p.pronamespace
     where n.nspname = 'wiki'
       and has_function_privilege('fswiki_anon', p.oid, 'execute')),
-  array['can(p_path ltree, p_is_folder boolean, p_owner uuid, p_cap wiki.capability)',
+  array[-- document_select's own three, added when the policy stopped walking
+        -- the tree once per row. acl_context() is the self-only overload, so
+        -- there is no principal to name; the form that takes one stays
+        -- revoked, and the assertion below is what holds that.
+        --
+        -- What acl_context() hands back is deliberately not the ACL. Every
+        -- executable function is a PostgREST RPC, so a caller can ask for
+        -- whatever a policy can: paths in there would be the list of pages
+        -- hidden from the asker. It carries sha256 of each path instead --
+        -- enough to confirm a path already guessed, which wiki.can() answers
+        -- anyway, and not enough to enumerate one. See tables/120.
+        'acl_context(p_cap wiki.capability)',
+        -- current_document exposes `capabilities`, which is one question per
+        -- capability per row. Same shape, same self-only rule.
+        'acl_contexts()',
+        'can(p_path ltree, p_is_folder boolean, p_owner uuid, p_cap wiki.capability)',
+        -- Reads no table. It answers from the context it is handed, so a
+        -- caller who invents one learns only what their invention says.
+        'can_ctx(p_path ltree, p_is_folder boolean, p_owner uuid, p_cap wiki.capability, p_ctx wiki.acl_context)',
         'can_traverse(p_document uuid, p_cap wiki.capability)',
         'can_traverse(p_path ltree, p_cap wiki.capability)',
         'capabilities_at(p_document uuid)',
+        'capabilities_at_ctx(p_path ltree, p_is_folder boolean, p_owner uuid, p_ctxs wiki.acl_context[])',
         'has_capability(p_document uuid, p_cap wiki.capability)',
+        -- sha256 of the argument. can_ctx() calls it and is not SECURITY
+        -- DEFINER, so it needs the grant; it discloses nothing that the
+        -- caller did not supply.
+        'path_key(p_path ltree)',
         -- PostgREST runs db-pre-request on every request, anonymous ones
         -- included, so this one is not optional. It takes no arguments and
         -- reads only the request headers; the block below is what stops those

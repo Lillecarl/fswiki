@@ -476,6 +476,239 @@ set search_path = wiki, public, pg_temp as $$
   end;
 $$;
 
+------------------------------------------------------------------------------
+-- The same rule, derived once per statement
+------------------------------------------------------------------------------
+--
+-- Everything above answers one question about one document, which is what a
+-- policy needs and what a policy costs. wiki.can() was 445 us per document and
+-- linear in the tree, so a thousand-document outline was half a second and a
+-- page did two of them. Issue #10 has the profile; the short version is that
+-- 268 ms of a 426 ms walk was wiki.acl_chain(), called once per row to
+-- re-derive the same ancestry.
+--
+-- Nothing in that derivation depends on the row. The caller's principals, the
+-- ACEs that name them, and whether those ACEs speak to the capability are all
+-- properties of the *statement*. So they are computed once, into a
+-- wiki.acl_context, and every row is answered from it. Measured on 1,021
+-- documents: 445 us per document before, 14 us after.
+--
+-- Building the context per row instead is not a shortcut worth taking: it
+-- costs 257 us, so it gives back nine tenths of the win. The InitPlan is the
+-- whole mechanism, and EXPLAIN is where you check it is still there.
+--
+-- These functions are a second implementation of a security rule, which is a
+-- thing to be nervous about. They are held to the first one by
+-- server/test/090_context_test.sql, which compares them against wiki.can()
+-- over the full cross product of documents, capabilities and users -- the same
+-- shape of proof that holds wiki.ace_closure to wiki.ace_covers_uncached().
+
+-- A path, as the context refers to it. See tables/120_acl_context.sql for why
+-- the context holds these rather than the paths themselves.
+--
+-- Immutable, so the planner may fold it where both sides are constant. sha256
+-- and convert_to are built in, so this adds no extension dependency.
+create or replace function wiki.path_key(p_path ltree)
+returns bytea
+language sql immutable parallel safe as $$
+  select sha256(convert_to(p_path::text, 'UTF8'));
+$$;
+
+-- Everything one caller's answer depends on, for one capability.
+create or replace function wiki.acl_context(
+  p_cap  wiki.capability,
+  p_user uuid
+)
+returns wiki.acl_context
+language sql stable security definer parallel safe
+set search_path = wiki, public, pg_temp as $$
+  with principals as (
+    select coalesce(array_agg(ep.principal_id), '{}'::uuid[]) as ids
+      from wiki.effective_principals(p_user) ep
+  ),
+  applicable as (
+    select anc.path,
+           (wiki.path_key(anc.path), nlevel(anc.path), a.ace_type,
+            a.inherit_only, a.container_inherit, a.object_inherit,
+            a.no_propagate)::wiki.acl_source as source
+      from wiki.ace a
+      join wiki.document anc on anc.id = a.document_id
+     where a.principal_id in (select unnest(ids) from principals)
+       -- now() is transaction time, so asking once is asking the same question
+       -- a thousand rows would have asked a thousand times.
+       and (a.expires_at is null or a.expires_at > now())
+       and wiki.ace_covers(a.role_id, p_cap, a.ace_type)
+  )
+  select (
+    wiki.is_superuser(p_user),
+    (select ids from principals),
+    coalesce((select array_agg(source) from applicable),
+             '{}'::wiki.acl_source[]),
+    coalesce((select array_agg((wiki.path_key(d.path), nlevel(d.path))::wiki.acl_cut)
+                from wiki.document d
+               where d.inheritance_blocked
+                 and exists (select 1 from applicable ap
+                              where ap.path @> d.path and ap.path <> d.path)),
+             '{}'::wiki.acl_cut[])
+  )::wiki.acl_context;
+$$;
+
+comment on function wiki.acl_context(wiki.capability, uuid) is
+  'The caller''s whole ACL for one capability, as one value. Call it from a '
+  'policy as an uncorrelated sub-SELECT -- (select wiki.acl_context(...)) -- '
+  'so PostgreSQL evaluates it once per statement rather than once per row.';
+
+-- wiki.can(), answered from a context instead of from the tables.
+--
+-- Reads nothing, so it is not SECURITY DEFINER and does not need to be. A
+-- caller who hands it a context of their own invention learns only what that
+-- invention says; the policy builds its own, from wiki.acl_context(), which is
+-- the function that reads the ACL as the owner.
+--
+-- The rule is wiki.resolve_ace()'s, unchanged: the applicable source nearest
+-- the document wins, deny before allow at equal distance, and no matching
+-- source means no. It reads the other way round here -- nearest is deepest --
+-- because a context has no document to measure a distance from.
+--
+-- PL/pgSQL rather than SQL, and the difference is not style. This runs once per
+-- row of every read, so what it costs is a plan, not an expression. Measured
+-- over 1,021 documents, same context, same answers:
+--
+--   two CTEs and a join per call                 217 us per document
+--   one flat sub-select per call                  34 us
+--   this loop, hashing every level up front       20 us
+--   this loop, hashing a level when asked         16.5 us
+--
+-- Against 445 us for wiki.can(), which is 27x. The last step matters because
+-- the cheap tests come first: a source is dropped on its depth and its
+-- inheritance flags before anything is hashed, and once a deeper source has
+-- won, a shallower one is skipped without hashing at all. On this tree that
+-- brings the cost of hiding the paths down to nothing measurable -- the same
+-- loop comparing ltree paths directly measures the same 17 us.
+create or replace function wiki.can_ctx(
+  p_path      ltree,
+  p_is_folder boolean,
+  p_owner     uuid,
+  p_cap       wiki.capability,
+  p_ctx       wiki.acl_context
+)
+returns boolean
+language plpgsql stable parallel safe as $$
+declare
+  s     wiki.acl_source;
+  c     wiki.acl_cut;
+  depth integer;
+  keys  bytea[];          -- key of this path's prefix at each level, as needed
+  floor_depth integer := 0;   -- the nearest cut; nothing above it applies
+  best  integer := -1;        -- depth of the winner so far
+  verdict wiki.ace_type;
+begin
+  if p_path is null then
+    return false;
+  end if;
+  if (p_ctx).is_superuser then
+    return true;
+  end if;
+  -- The owner's standing right to repair the ACL, and nothing more.
+  if p_cap = 'grant' and p_owner = any ((p_ctx).principals) then
+    return true;
+  end if;
+
+  depth := nlevel(p_path);
+
+  -- The cut. A blocked ancestor hides everything above it, and the nearest one
+  -- is the deepest; a source at or below it survives. `cuts` is usually empty,
+  -- so this usually costs one array probe.
+  foreach c in array (p_ctx).cuts loop
+    if c.depth <= depth and c.depth > floor_depth then
+      if keys[c.depth] is null then
+        keys[c.depth] := wiki.path_key(subpath(p_path, 0, c.depth));
+      end if;
+      if c.prefix = keys[c.depth] then
+        floor_depth := c.depth;
+      end if;
+    end if;
+  end loop;
+
+  foreach s in array (p_ctx).sources loop
+    -- Cheap first, and in this order on purpose: everything before the hash
+    -- rejects a source without computing one.
+    if s.depth < floor_depth or s.depth > depth or s.depth < best then
+      continue;
+    end if;
+    if s.depth = best and verdict = 'deny' then
+      continue;   -- deny already won at this depth; nothing here can beat it
+    end if;
+    if s.depth = depth then
+      -- The ACE sits on this very document. inherit_only means it does not
+      -- apply here, only below.
+      if s.inherit_only then
+        continue;
+      end if;
+    else
+      if p_is_folder then
+        if not s.container_inherit then continue; end if;
+      else
+        if not s.object_inherit then continue; end if;
+      end if;
+      if s.no_propagate and depth - s.depth <> 1 then
+        continue;   -- immediate children only
+      end if;
+    end if;
+    -- Containment, which is where the path would have been.
+    if keys[s.depth] is null then
+      keys[s.depth] := wiki.path_key(subpath(p_path, 0, s.depth));
+    end if;
+    if s.prefix <> keys[s.depth] then
+      continue;
+    end if;
+    -- Nearest wins; deny wins a tie.
+    if s.depth > best or verdict is null or s.ace_type = 'deny' then
+      best := s.depth;
+      verdict := s.ace_type;
+    end if;
+  end loop;
+
+  -- No source spoke to this document at all: the ACL is a closed world. The
+  -- coalesce is not a formality -- without it this returns NULL where
+  -- wiki.can() returns false, which a WHERE clause hides and a comparison does
+  -- not. The cross-product test in 090 is what found that.
+  return coalesce(verdict = 'allow', false);
+end;
+$$;
+
+-- One context per capability, in enum order, for the callers that need all of
+-- them. wiki.current_document exposes `capabilities`, which is eight questions
+-- about every row, and eight contexts built once beat eight ACL walks per row
+-- by the same argument and the same factor.
+create or replace function wiki.acl_contexts(p_user uuid)
+returns wiki.acl_context[]
+language sql stable security definer parallel safe
+set search_path = wiki, public, pg_temp as $$
+  select array_agg(wiki.acl_context(c.cap, p_user) order by c.ord)
+    from unnest(enum_range(null::wiki.capability)) with ordinality as c(cap, ord);
+$$;
+
+-- Everything the caller may do at a document, from those contexts.
+--
+-- Reads nothing, like wiki.can_ctx(), and pairs with it: the ordinality is the
+-- enum's own order on both sides, so contexts[i] is the context for
+-- capability[i]. Getting that pairing wrong would answer every question with
+-- the wrong capability's ACL, which is why 090 compares the whole array
+-- against wiki.capabilities_at() for every document and every user.
+create or replace function wiki.capabilities_at_ctx(
+  p_path      ltree,
+  p_is_folder boolean,
+  p_owner     uuid,
+  p_ctxs      wiki.acl_context[]
+)
+returns wiki.capability[]
+language sql stable parallel safe as $$
+  select coalesce(array_agg(c.cap order by c.cap), '{}')
+    from unnest(enum_range(null::wiki.capability)) with ordinality as c(cap, ord)
+   where wiki.can_ctx(p_path, p_is_folder, p_owner, c.cap, p_ctxs[c.ord]);
+$$;
+
 -- Convenience form for everything that is not a policy on wiki.document itself:
 -- ACEs, revisions, drafts, the CLI. Safe wherever the row is known to exist.
 create or replace function wiki.has_capability(
@@ -526,11 +759,17 @@ set search_path = wiki, public, pg_temp as $$
     -- below is what keeps the world closed.
     when wiki.is_superuser(p_user) then true
     else exists (
+      -- The context is built once for the whole scan rather than once per
+      -- descendant, which is the same trick document_select plays and for the
+      -- same reason. It stays inside this function: nothing here is granted to
+      -- a client, so there is no forged context to worry about and no ACL to
+      -- hand back. Descendants cost 14 us each instead of 445 us.
       select 1
         from wiki.document child
        where child.path <@ p_path
          and child.path <> p_path
-         and wiki.can(child.path, child.is_folder, child.owner_id, p_cap, p_user)
+         and wiki.can_ctx(child.path, child.is_folder, child.owner_id, p_cap,
+                          (select wiki.acl_context(p_cap, p_user)))
     )
   end;
 $$;
@@ -725,6 +964,25 @@ returns boolean
 language sql stable security definer parallel safe
 set search_path = wiki, public, pg_temp as $$
   select wiki.has_capability(p_document, p_cap, wiki.current_user_id());
+$$;
+
+-- The context, for the caller and nobody else. This is the one the policies
+-- call, and the only one a client is granted: the two-argument form would hand
+-- back another principal's whole ACL -- every ACE that names them, with the
+-- path it sits on -- which is a larger version of exactly the oracle
+-- 950_lockdown.sql was written to close.
+create or replace function wiki.acl_context(p_cap wiki.capability)
+returns wiki.acl_context
+language sql stable security definer parallel safe
+set search_path = wiki, public, pg_temp as $$
+  select wiki.acl_context(p_cap, wiki.current_user_id());
+$$;
+
+create or replace function wiki.acl_contexts()
+returns wiki.acl_context[]
+language sql stable security definer parallel safe
+set search_path = wiki, public, pg_temp as $$
+  select wiki.acl_contexts(wiki.current_user_id());
 $$;
 
 -- Invoker, like the form it shadows: it reads no table of its own, and every

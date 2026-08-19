@@ -71,7 +71,20 @@ grant execute on function
     wiki.can_traverse(ltree, wiki.capability),
     wiki.can_traverse(uuid, wiki.capability),
     wiki.has_capability(uuid, wiki.capability),
-    wiki.capabilities_at(uuid)
+    wiki.capabilities_at(uuid),
+    -- document_select's own two functions. acl_context() is the self-only
+    -- overload; the form that takes a principal stays revoked. can_ctx()
+    -- reads no table at all -- it answers from the context it is handed -- so
+    -- a caller who forges one learns only what their own forgery says.
+    wiki.acl_context(wiki.capability),
+    wiki.can_ctx(ltree, boolean, uuid, wiki.capability, wiki.acl_context),
+    -- sha256 of a path. Granted because can_ctx() calls it and can_ctx() is
+    -- not SECURITY DEFINER; it discloses nothing, being a public hash of an
+    -- argument the caller supplied.
+    wiki.path_key(ltree),
+    -- current_document's `capabilities` column, the same way.
+    wiki.acl_contexts(),
+    wiki.capabilities_at_ctx(ltree, boolean, uuid, wiki.acl_context[])
   to fswiki_user;
 
 grant select on wiki.capability_requires to fswiki_user;
@@ -103,5 +116,10 @@ grant execute on function
     wiki.can_traverse(ltree, wiki.capability),
     wiki.can_traverse(uuid, wiki.capability),
     wiki.has_capability(uuid, wiki.capability),
-    wiki.capabilities_at(uuid)
+    wiki.capabilities_at(uuid),
+    wiki.acl_context(wiki.capability),
+    wiki.can_ctx(ltree, boolean, uuid, wiki.capability, wiki.acl_context),
+    wiki.path_key(ltree),
+    wiki.acl_contexts(),
+    wiki.capabilities_at_ctx(ltree, boolean, uuid, wiki.acl_context[])
   to fswiki_anon;

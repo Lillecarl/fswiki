@@ -422,10 +422,86 @@ So a page's two reads went from ~168 ms to ~21 ms, and rendering — 0.12 ms for
 a small page, 9.90 ms for a long one — stopped being a rounding error. The
 cache earns its keep at the long end now.
 
-What did not change is the shape: `wiki.can()` is still called once per
-document by `document_select`, so a read of the tree is still O(documents
-visible). The constant is about twelve times smaller. Issue #10 has the profile
-and what is still open.
+What that did not change is the shape: `wiki.can()` was still called once per
+document by `document_select`, so reading the tree stayed linear in the
+documents visible — 1,326 µs per document before the closure and 246 µs after,
+flat at every size measured. A thousand-document wiki was 254 ms per tree read
+and a page does two of them.
+
+**That shape is what changed next.** Nothing `wiki.can()` derives per row
+depends on the row: which principals the caller counts as, which ACEs name
+them, and which of those speak to `read` are all properties of the *statement*.
+So they are derived once, into a `wiki.acl_context`, and every row is answered
+from it. The mechanism is one line of SQL and it is easy to lose:
+
+```sql
+wiki.can_ctx(path, is_folder, owner_id, 'read', (select wiki.acl_context('read')))
+```
+
+`(select f())` with nothing correlated inside it is an **InitPlan**, which
+PostgreSQL evaluates once per statement. Written as a bare
+`wiki.acl_context('read')` it is a per-row call and gives back nine tenths of
+the win — measured: 257 µs to build a context, against 16 µs to answer from
+one. `EXPLAIN` is where you check the InitPlan is still there.
+
+| documents | before | after | |
+| --- | --- | --- | --- |
+| 22 | 13.4 ms | **2.6 ms** | 5.2× |
+| 175 | 42.5 ms | **5.7 ms** | 7.5× |
+| 991 | 234.1 ms | **16.6 ms** | 14.1× |
+| 3,031 | 669.7 ms | **42.0 ms** | 15.9× |
+
+Per document that is 445 µs down to 13.8 µs. It is still linear — the policy
+still has to answer for every row — but the constant is 27× smaller and the
+answer is now a loop over a handful of array entries rather than a walk up the
+tree with a join at every step.
+
+The same InitPlan fixed two more reads that were not policies at all.
+`wiki.current_document` exposes a `capabilities` column, which is eight ACL
+questions per row and was the most expensive thing the mount asks for;
+`wiki.syncable_document` asked by document id, which resolves to the path it
+already had in hand. Over HTTP, same stack, the 19 fixture documents:
+
+| | original | with the closure | now |
+| --- | --- | --- | --- |
+| the outline read | 41.3 ms | 11.1 ms | **3.3 ms** |
+| the manifest, with capabilities | 410 ms | 91.2 ms | **9.1 ms** |
+| the syncable tree | — | 11.4 ms | **8.4 ms** |
+
+`wiki.document_version` is the one left at the old cost, and deliberately. A
+version row names its document by id, so a context-taking function would have
+to resolve that id — and a caller can invent a context, which turns an id
+lookup into an existence oracle. Nothing reads versions in bulk (content comes
+one document at a time through `read_document`), so it stays as it is until
+something does.
+
+**The context deliberately does not contain the ACL.** A policy is checked
+against the *querying* role, so every function a policy names has to be
+executable by that role — and PostgREST exposes every executable function as an
+RPC. Whatever `wiki.acl_context()` returns is therefore something any caller
+can simply ask for. Returning the ACEs with their paths would hand them the
+list of documents carrying a deny against them: the paths of the pages hidden
+from them, without guessing one. That is the property this whole project turns
+on.
+
+So a source carries `sha256` of the path it sits on rather than the path, and
+containment becomes equality against the hash of the target's prefix at the
+same depth. A caller gets depths and flags — enough to confirm a path they
+already guessed, which `wiki.can()` answers for any path they can name anyway,
+and not enough to enumerate one they have not. Hiding the paths costs nothing
+measurable, because the cheap tests run first: a source is dropped on its depth
+and its inheritance flags before anything is hashed, and once a deeper source
+has won, a shallower one is skipped without hashing at all.
+
+A second implementation of a security rule is a thing to be nervous about.
+`wiki.can()` stays as the specification, and `server/test/090_context_test.sql`
+compares the two over the full cross product — every document, every
+capability, every user, both values of `is_folder` — plus a subtree built with
+one branch per ACE flag, and an assertion that each branch actually changed an
+answer. It found one real bug: the loop returned NULL where `wiki.can()`
+returns false, which a `WHERE` clause hides and a comparison does not.
+
+Issue #10 has the profile and what is still open.
 
 The cache stays regardless. It is correct, it is 60 lines, it costs nothing at
 a hit, and it stops being invisible the moment syntax highlighting lands (#9),

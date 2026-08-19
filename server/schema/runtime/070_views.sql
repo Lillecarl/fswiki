@@ -38,7 +38,11 @@ create view wiki.current_document
          v.content_type,
          v.content_hash,
          v.created_at as version_created_at,
-         wiki.capabilities_at(d.id) as capabilities
+         -- Eight questions per row, so the contexts are built once for the
+         -- statement rather than once per row. Same InitPlan as
+         -- document_select; see the end of 040_authz.sql.
+         wiki.capabilities_at_ctx(d.path, d.is_folder, d.owner_id,
+                                  (select wiki.acl_contexts())) as capabilities
     from wiki.document d
     left join wiki.document_version v
       on v.document_id = d.id and upper_inf(v.valid)
@@ -58,12 +62,17 @@ comment on view wiki.current_document is
 --
 -- Folders appear when they lead somewhere syncable, on the same reasoning as
 -- wiki.can_traverse() for reads: a mount with holes in its path is unusable.
+--
+-- It asks by path rather than by id, which is the same question -- the id
+-- resolves to the path -- and lets the context be built once for the statement
+-- instead of an ACL walk per row. See document_select in 050_rls.sql.
 create view wiki.syncable_document
   with (security_invoker = true) as
   select d.*
     from wiki.current_document d
-   where wiki.has_capability(d.id, 'sync')
-      or (d.is_folder and wiki.can_traverse(d.id, 'sync'));
+   where wiki.can_ctx(d.path, d.is_folder, d.owner_id, 'sync',
+                      (select wiki.acl_context('sync')))
+      or (d.is_folder and wiki.can_traverse(d.path, 'sync'));
 
 comment on view wiki.syncable_document is
   'The subtree a client may mirror locally. Always a subset of what RLS lets the '
