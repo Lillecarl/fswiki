@@ -16,11 +16,25 @@ from __future__ import annotations
 
 import logging
 
+from . import maths
 from .registry import register
 
 log = logging.getLogger(__name__)
 
 MARKDOWN = ("text/markdown",)
+
+
+def _convert(latex: str, options: dict) -> str:
+    """The maths hook mdit-py-plugins takes, which by default only escapes."""
+    return maths.to_mathml(latex, block=options["display_mode"])
+
+
+def _inline_math(renderer, latex: str) -> str:
+    return f'<span class="math inline">{maths.to_mathml(latex)}</span>'
+
+
+def _block_math(renderer, latex: str) -> str:
+    return f'<div class="math block">{maths.to_mathml(latex, block=True)}</div>\n'
 
 
 class MarkdownItBackend:
@@ -38,10 +52,20 @@ class MarkdownItBackend:
     # disagreeing about `~~struck~~` is exactly the kind of thing having two of
     # them is supposed to surface.
     options = {"preset": "commonmark", "html": False,
-               "enable": ["table", "strikethrough"]}
+               "enable": ["table", "strikethrough"],
+               # `$` is a currency sign far more often than it is a maths
+               # delimiter, so the plugin has to be told when it is not maths.
+               # `allow_digits` off leaves "$5 and $10" alone and `allow_space`
+               # off leaves "$ 5" alone. mistune's own pattern refuses both
+               # already, so this is how the two engines are made to agree.
+               # Nested here rather than beside the class so that flipping one
+               # moves the cache key, which is what `options` is for.
+               "dollarmath": {"allow_labels": False, "allow_space": False,
+                              "allow_digits": False, "double_inline": False}}
 
     def __init__(self) -> None:
         import markdown_it
+        from mdit_py_plugins.dollarmath import dollarmath_plugin
 
         self.version = markdown_it.__version__
         # html=False is the first of the two layers described in safety.py.
@@ -49,6 +73,11 @@ class MarkdownItBackend:
             self.options["preset"], {"html": self.options["html"]})
         for extension in self.options["enable"]:
             self._md.enable(extension)
+        self._md.use(dollarmath_plugin, renderer=_convert,
+                     **self.options["dollarmath"])
+        # Which maths converter is installed changes the bytes, so it goes in
+        # the id beside the options that produced them.
+        self.options = self.options | {"maths": maths.version()}
 
     def to_html(self, text: str) -> str:
         return self._md.render(text)
@@ -63,13 +92,20 @@ class MistuneBackend:
 
     name = "mistune"
     content_types = MARKDOWN
-    options = {"escape": True, "plugins": ["table", "strikethrough"]}
+    options = {"escape": True, "plugins": ["table", "strikethrough", "math"]}
 
     def __init__(self) -> None:
         import mistune
 
         self.version = mistune.__version__
         self._md = mistune.create_markdown(**self.options)
+        # mistune's math plugin parses `$...$` and then writes the LaTeX back
+        # out untouched. These two convert it instead, in the wrapper
+        # mdit-py-plugins uses, so the engines differ in what they accept and
+        # not in what they emit.
+        self._md.renderer.register("inline_math", _inline_math)
+        self._md.renderer.register("block_math", _block_math)
+        self.options = self.options | {"maths": maths.version()}
 
     def to_html(self, text: str) -> str:
         return self._md(text)
@@ -124,6 +160,11 @@ class RstBackend:
         # Avoids a pygments dependency, and pygments emits inline style
         # attributes that the sanitiser would drop anyway.
         "syntax_highlight": "none",
+        # docutils converts `:math:` to MathML itself, so this backend needs
+        # no latex2mathml. Named rather than left to the default because the
+        # default has moved: older docutils wrote HTML with a stylesheet, and
+        # an upgrade must not quietly change what a page contains.
+        "math_output": "mathml",
     }
 
     def __init__(self) -> None:

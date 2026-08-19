@@ -22,10 +22,6 @@ import json
 import os
 from typing import Protocol, runtime_checkable
 
-# Bumped when the pre- or post-passes change what they emit. It travels in the
-# renderer id and therefore in the cache key, because a cached body is only
-# reusable if the whole pipeline that produced it is the same — the backend
-# alone does not identify the output.
 # What the passes on either side of the backend emit, versioned. It travels in
 # the renderer id and therefore in the cache key, because a cached body is only
 # reusable if the whole pipeline that produced it is the same.
@@ -33,7 +29,9 @@ from typing import Protocol, runtime_checkable
 #   2: the sanitiser began allowing <section> and <aside>, for docutils.
 #   3: and <s>, which markdown-it emits for `~~struck~~` and which was being
 #      unwrapped -- the text rendered, unstruck, with nothing to indicate it.
-PIPELINE_VERSION = 3
+#   4: and MathML, which is foreign content and was therefore being dropped
+#      whole -- 206 bytes of it in, 0 out. See render.maths.
+PIPELINE_VERSION = 4
 
 
 @runtime_checkable

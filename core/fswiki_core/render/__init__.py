@@ -3,7 +3,7 @@
     >>> from fswiki_core import render
     >>> page = render.render("# Hi\n\nsee [[public/welcome]]")
     >>> page.renderer
-    'markdown-it-py/4.2.0+fswiki1'
+    'markdown-it-py/4.2.0+cfgfff05eca+fswiki4'
 
 The pipeline is three steps and only the middle one is pluggable:
 
@@ -49,7 +49,7 @@ class Rendered:
     """HTML, and enough about how it was made to cache it safely."""
 
     html: str
-    #: `<backend>/<version>+fswiki<pipeline>`. Part of the cache key.
+    #: `<backend>/<version>+cfg<options>+fswiki<pipeline>`. The cache key.
     renderer: str
     content_type: str
 

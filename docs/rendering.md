@@ -46,6 +46,7 @@ expensive.
 | this repo's `audit-trail.md` (14.7 kB) | **9.00 ms** | a long page, by wiki standards |
 | sanitising the output (nh3) | 0.59 ms | |
 | one code block through pygments | 1.81 ms | |
+| one maths expression to MathML | 0.32 ms | `latex2mathml`, in-process |
 | **a cache hit** | **0.17 µs** | a dict lookup |
 
 Roughly 0.6 ms per kB, against the ~30 ms a content fetch already costs over
@@ -230,11 +231,62 @@ which is the only way a future browser-side live preview agrees with the server
 without shipping two dialects. `mistune` is within 2 % on speed and ships as the
 second opinion. `plain` needs no library at all.
 
+### Maths, and the subprocess it does not need
+
+`$e^{i\pi}+1=0$` renders to MathML in **0.32 ms**, in this process. There is
+no TeX, no scratch directory, no timeout and no concurrency cap, and the reason
+is a distinction worth stating plainly: **maths is not a LaTeX document.**
+
+`latex2mathml` is a converter rather than an interpreter. It reads the notation
+and writes MathML, and it has no filesystem and no subprocess to reach for.
+Measured against the two things a real TeX run would hand an author:
+
+| written | what happens |
+| --- | --- |
+| `\input{/etc/hostname}` | 260 B of MathML; the hostname is not in it |
+| `\write18{touch /tmp/x}` | 291 B of MathML; nothing runs |
+| `\def\x{\x}\x` | `RecursionError` in 0.5 ms — caught |
+
+That third row is the only failure mode, and it is the interesting one: it
+*raises*, which a TeX process in a `\loop` would not. Issue #7 has the
+measurements for the other route — `openin_any` defaults to `a`, so a document
+reads any file the process can — and none of it is needed here.
+
+Three things can go wrong: the converter is absent, the expression is
+malformed, or the expression is pathological. All three show the LaTeX source
+instead, in the shape docutils already uses for maths it cannot convert, so the
+markdown path and the reStructuredText path degrade the same way.
+
+reStructuredText needs none of this. docutils converts `:math:` and `.. math::`
+itself, so `math_output` is pinned to `mathml` rather than left to a default
+that has already moved once.
+
+**The sanitiser was the whole job.** MathML is *foreign content* to the HTML
+parser, which means an element nh3 does not know is dropped **whole** — children
+and text with it — rather than unwrapped. Measured before the allowlist existed:
+206 bytes of MathML in, **0 bytes out**, not even the numbers. So MathML is
+listed explicitly, and `PIPELINE_VERSION` went to 4.
+
+The list is the union of what the two converters emit, and two things are left
+out on purpose:
+
+- **`annotation-xml`.** With `encoding="text/html"` it becomes an HTML
+  integration point, which is the classic mutation-XSS route through a
+  sanitiser that allows MathML. Left out, nh3 drops it and the `<script>`
+  inside it together.
+- **`href`, on every element.** `\href{...}{...}` puts one on an `<mrow>`, and
+  latex2mathml will write `<mrow href="javascript:alert(1)">` without complaint.
+  Maths is notation, not navigation.
+
+That is why this was a smaller decision than allowing SVG. MathML has no
+scripting element, nothing that navigates, and no `foreignObject` to smuggle
+HTML through.
+
 ### The renderer is part of the cache key
 
 `Rendered.renderer` identifies the whole pipeline, not just the engine:
 
-    markdown-it-py/4.2.0+fswiki1
+    markdown-it-py/4.2.0+cfgfff05eca+fswiki4
 
 That goes in the cache key beside `(document_id, version)`. Leave it out and
 switching engines — or upgrading one — quietly serves output that the code now
@@ -346,8 +398,10 @@ argument is one the caller gets to make. They are two grants instead.
 - **Attachments and images.** An image referencing a wiki path needs the ACL
   applied to something that is not a document, which is a schema question
   before it is a rendering one.
-- **Diagrams and maths.** Publish-time materialisation by the rule above, not
-  the read path.
+- **Diagrams.** Publish-time materialisation, not the read path. Every diagram
+  renderer worth having is a subprocess, and a subprocess in a read path is a
+  sandbox, a timeout and a concurrency cap. Maths turned out not to need any of
+  that; see above.
 - **Search.** A different problem that happens to also read every document.
 - **Themes.** Nothing about them is hard; nothing about them is interesting
   until there is a second reader.

@@ -98,6 +98,13 @@ th, td { border-bottom: 1px solid var(--rule); padding: .45rem .7rem;
 th { font-weight: 600; }
 tbody tr:last-child td { border-bottom: 0; }
 
+/* Maths. Browsers lay MathML out themselves, so the only job here is to keep
+   a wide expression from widening the page, and to make a failed conversion
+   look like the source it is. See render.maths. */
+.math.block { overflow-x: auto; margin: 0 0 1.1rem; }
+tt.math { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          font-size: .875em; color: var(--dim); }
+
 /* The index. Indentation carries the tree, so nothing else has to. */
 ul.tree { list-style: none; padding: 0; font-family: ui-sans-serif, system-ui, sans-serif;
           font-size: .95rem; }

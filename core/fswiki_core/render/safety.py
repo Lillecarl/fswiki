@@ -34,6 +34,10 @@ TAGS = {
     # unwraps every `.. note::` into an undistinguished paragraph, which loses
     # the one thing an admonition is for.
     "section", "aside",
+    # `tt` is obsolete HTML, and docutils emits it for an inline expression it
+    # could not convert. Keeping it keeps failed maths visibly maths instead
+    # of running it into the prose. See render.maths.
+    "tt",
 }
 
 ATTRIBUTES = {
@@ -48,6 +52,65 @@ ATTRIBUTES = {
     # `class` carries which kind of admonition it is; `id` is what a deep link
     # into a section needs. Both are inert, and div/span already allow class.
     "aside": {"class"}, "section": {"id", "class"},
+    # `class="math"` is what says an expression failed to convert rather than
+    # that an author wrote monospaced text.
+    "tt": {"class"},
+}
+
+# MathML, which is what an expression renders to. See render.maths.
+#
+# It needs listing at all because it is *foreign content* to the HTML parser:
+# an element the sanitiser does not know is dropped whole here, children and
+# text with it, rather than unwrapped. Measured before this list existed --
+# 206 bytes of MathML in, 0 bytes out, not even the numbers.
+#
+# The surface is small and inert. There is no scripting element, nothing that
+# navigates, and no `foreignObject` to smuggle HTML through, which is what
+# makes this a much smaller decision than allowing SVG (issue #6). It is the
+# union of what our two producers emit: latex2mathml for markdown, and
+# docutils' own converter for reStructuredText.
+#
+# Two omissions are deliberate, and both were measured rather than assumed:
+#
+#   `annotation-xml` is absent. With `encoding="text/html"` it becomes an HTML
+#   integration point, which is the classic mutation-XSS route through a
+#   sanitiser. Left out, nh3 drops the element and the `<script>` inside it.
+#
+#   `href` is absent from every element. `\href{...}{...}` puts one on an
+#   `<mrow>`, and latex2mathml will happily write
+#   `<mrow href="javascript:alert(1)">`. Maths is notation, not navigation.
+MATHML_TAGS = {
+    "math", "mrow", "mi", "mn", "mo", "mtext", "mspace",
+    "mfrac", "msqrt", "mroot", "mstyle", "mpadded", "mphantom", "menclose",
+    "msub", "msup", "msubsup", "munder", "mover", "munderover",
+    "mtable", "mtr", "mtd",
+    # docutils uses this to show an expression it could not parse.
+    "merror",
+}
+
+# Presentation only: sizes, alignment, colours and which glyphs stretch.
+# Nothing here is a URL, so nothing here goes through `url_schemes`, and
+# nothing here needs to.
+MATHML_ATTRIBUTES = {
+    "math": {"display", "xmlns", "class"},
+    "menclose": {"notation"},
+    "mfrac": {"linethickness", "numalign"},
+    "mi": {"mathvariant"},
+    "mn": {"mathvariant"},
+    "mtext": {"mathvariant"},
+    "mo": {"accent", "fence", "form", "largeop", "lspace", "rspace",
+           "maxsize", "minsize", "movablelimits", "stretchy", "symmetric"},
+    "mover": {"accent"},
+    "munder": {"accentunder"},
+    "munderover": {"accent", "accentunder"},
+    "mpadded": {"depth", "height", "lspace", "voffset", "width",
+                "mathbackground"},
+    "mspace": {"depth", "height", "linebreak", "width", "mathbackground"},
+    "mstyle": {"displaystyle", "mathbackground", "mathcolor", "mathsize",
+               "mathvariant", "scriptlevel"},
+    "mtable": {"columnalign", "columnspacing", "displaystyle", "rowlines",
+               "rowspacing"},
+    "mtd": {"columnalign", "columnspan", "rowspan"},
 }
 
 # Wiki links are relative paths under a reserved prefix rather than a custom
@@ -72,8 +135,8 @@ def clean(html: str) -> str:
 
     return nh3.clean(
         html,
-        tags=TAGS,
-        attributes=ATTRIBUTES,
+        tags=TAGS | MATHML_TAGS,
+        attributes={**ATTRIBUTES, **MATHML_ATTRIBUTES},
         url_schemes=URL_SCHEMES,
         strip_comments=True,
         link_rel="noopener noreferrer",

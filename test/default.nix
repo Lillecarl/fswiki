@@ -40,8 +40,10 @@ let
     ps.httpx
     ps.nh3
     ps.markdown-it-py
+    ps.mdit-py-plugins
     ps.mistune
     ps.docutils
+    ps.latex2mathml
   ]);
   # Just coverage, for the *subprocesses*. The CLI, the mount and the preview
   # server run in their own Nix python environments, so the only way to measure
