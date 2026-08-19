@@ -376,3 +376,66 @@ select wiki_test.expect_eq('anon: still sees only what public was granted',
 
 reset role;
 select set_config('request.headers', '', false);
+
+------------------------------------------------------------------------------
+-- Nobody owns a document as public
+------------------------------------------------------------------------------
+--
+-- wiki.can() hands a document's owner a standing `grant` right, matched against
+-- the caller's effective principals -- so an owning group confers it on that
+-- group. `public` is in everybody's, which would make an owning `public` mean
+-- "anyone may re-ACL this page", anonymous callers included. Reachable from
+-- `write` alone, because owner_id is an ordinary column and document_update
+-- gates on 'write'.
+
+select wiki_test.expect_rejected('public cannot be given a document at insert',
+  $q$insert into wiki.document (parent_id, slug, is_folder, title, owner_id)
+     select d.id, 'handover', false, 'Handover',
+            (select p.id from wiki.principal p
+              where p.kind = 'group' and p.name = 'public')
+       from wiki.document d where d.path = 'root'::ltree$q$);
+
+select wiki_test.expect_rejected('and a page cannot be handed over later',
+  $q$update wiki.document
+        set owner_id = (select p.id from wiki.principal p
+                         where p.kind = 'group' and p.name = 'public')
+      where path = 'root.notices'::ltree$q$);
+
+-- The route that made it worth a trigger rather than a note: `write` is all it
+-- would have taken. Bob gets editor on the bulletin and nothing else -- granted
+-- here rather than borrowed from the fixtures, because 030_push_test.sql moves
+-- documents about and a test that depends on where they ended up is a test that
+-- fails for the wrong reason.
+insert into wiki.ace (document_id, principal_id, role_id, ace_type)
+select d.id,
+       (select p.id from wiki.principal p where p.kind = 'user' and p.name = 'bob'),
+       (select r.id from wiki.role r where r.name = 'editor'),
+       'allow'
+  from wiki.document d where d.path = 'root.bulletin'::ltree;
+
+-- Asked as superuser: wiki_test.doc() is the caller's view of the tree.
+select wiki_test.expect_eq('bob: may edit the bulletin',
+  wiki.has_capability(wiki_test.doc('root.bulletin'), 'write',
+                      wiki_test.who('bob')), true);
+select wiki_test.expect_eq('bob: and holds no grant right on it',
+  wiki.has_capability(wiki_test.doc('root.bulletin'), 'grant',
+                      wiki_test.who('bob')), false);
+
+select wiki_test.login('bob');
+set role fswiki_user;
+select wiki_test.expect_rejected('bob: but cannot hand it to the internet',
+  $q$update wiki.document
+        set owner_id = (select p.id from wiki.principal p
+                         where p.kind = 'group' and p.name = 'public')
+      where path = 'root.bulletin'::ltree$q$);
+reset role;
+
+-- Group ownership in general is untouched: only the group everyone is in is
+-- refused.
+select wiki_test.expect_eq('an ordinary group may still own a document',
+  wiki_test.sqlstate_of(
+    $q$update wiki.document
+          set owner_id = (select p.id from wiki.principal p
+                           where p.kind = 'group' and p.name = 'engineering')
+        where path = 'root.bulletin'::ltree$q$) is null,
+  true);
