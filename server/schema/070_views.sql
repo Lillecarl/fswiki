@@ -91,4 +91,9 @@ comment on function wiki.document_as_of(timestamptz) is
   'so the caller sees only what they may read today.';
 
 grant select on wiki.current_document, wiki.syncable_document to fswiki_user;
+-- The same two views for an unauthenticated caller. Both are
+-- security_invoker, so RLS is evaluated against fswiki_anon and the rows that
+-- come back are the ones granted to `public` -- the view adds no visibility of
+-- its own, which is the entire reason for that setting.
+grant select on wiki.current_document, wiki.syncable_document to fswiki_anon;
 grant execute on function wiki.document_as_of(timestamptz) to fswiki_user;

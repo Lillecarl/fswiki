@@ -156,3 +156,9 @@ $$;
 
 grant usage on schema wiki_test to fswiki_user;
 grant execute on all functions in schema wiki_test to fswiki_user;
+
+-- And for fswiki_anon, so the unauthenticated tests can record their verdicts
+-- from inside SET ROLE. wiki_test is not in PGRST_DB_SCHEMAS, so this exists
+-- only for the suite.
+grant usage on schema wiki_test to fswiki_anon;
+grant execute on all functions in schema wiki_test to fswiki_anon;

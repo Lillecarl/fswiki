@@ -82,13 +82,44 @@ grant execute on function
     wiki.can_traverse(uuid, wiki.capability, uuid),
     wiki.can_traverse(ltree, wiki.capability, uuid),
     wiki.capabilities_at(uuid, uuid),
-    wiki.explain_acl(uuid, uuid)
+    wiki.explain_acl(uuid, uuid),
+    -- The self-only forms, which is what the SELECT policies and the views
+    -- actually resolve to now. See the end of 040_authz.sql.
+    wiki.can(ltree, boolean, uuid, wiki.capability),
+    wiki.can_traverse(ltree, wiki.capability),
+    wiki.can_traverse(uuid, wiki.capability),
+    wiki.has_capability(uuid, wiki.capability),
+    wiki.capabilities_at(uuid)
   to fswiki_user;
 
 grant select on wiki.capability_requires to fswiki_user;
 
 -- wiki.change_token() is granted in 075_changes.sql, beside its definition.
 
--- Anonymous requests get a usable connection and nothing else; every policy
--- keys off wiki.current_user_id(), which is NULL without a token.
+-- Anonymous requests.
+--
+-- Start from nothing and add back the read path, one object at a time. This
+-- list is the entire surface an unauthenticated caller can reach, and it is
+-- meant to be short enough to read in one sitting and audit in another;
+-- 070_public_test.sql asserts it exactly, so adding to it takes a deliberate
+-- edit in two places.
 revoke all on all tables in schema wiki from fswiki_anon;
+
+-- Two tables, both under RLS. An anonymous caller resolves to {public} and
+-- nothing else -- see wiki.effective_principals() -- so these return the rows
+-- granted to public and no others. Notably absent: principal, user_account,
+-- group_member and the role tables. Those hold the user directory, and no page
+-- needs them to render.
+grant select on wiki.document, wiki.document_version to fswiki_anon;
+
+-- The self-only forms, and *only* the self-only forms. Each asks its question
+-- about wiki.current_user_id() and takes no principal argument, so there is no
+-- way to phrase "what may someone else read" with any of them. The long forms,
+-- explain_acl() and current_user_id() itself stay revoked.
+grant execute on function
+    wiki.can(ltree, boolean, uuid, wiki.capability),
+    wiki.can_traverse(ltree, wiki.capability),
+    wiki.can_traverse(uuid, wiki.capability),
+    wiki.has_capability(uuid, wiki.capability),
+    wiki.capabilities_at(uuid)
+  to fswiki_anon;

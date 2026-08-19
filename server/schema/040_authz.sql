@@ -346,7 +346,7 @@ create or replace function wiki.can(
   p_is_folder boolean,
   p_owner     uuid,
   p_cap       wiki.capability,
-  p_user      uuid default wiki.current_user_id()
+  p_user      uuid
 )
 returns boolean
 language sql stable security definer parallel safe
@@ -373,7 +373,7 @@ $$;
 create or replace function wiki.has_capability(
   p_document uuid,
   p_cap      wiki.capability,
-  p_user     uuid default wiki.current_user_id()
+  p_user     uuid
 )
 returns boolean
 language sql stable security definer parallel safe
@@ -407,8 +407,8 @@ $$;
 -- request.
 create or replace function wiki.can_traverse(
   p_path ltree,
-  p_cap  wiki.capability default 'read',
-  p_user uuid default wiki.current_user_id()
+  p_cap  wiki.capability,
+  p_user uuid
 )
 returns boolean
 language sql stable security definer parallel safe
@@ -429,8 +429,8 @@ $$;
 
 create or replace function wiki.can_traverse(
   p_document uuid,
-  p_cap      wiki.capability default 'read',
-  p_user     uuid default wiki.current_user_id()
+  p_cap      wiki.capability,
+  p_user     uuid
 )
 returns boolean
 language sql stable security definer parallel safe
@@ -444,7 +444,7 @@ $$;
 -- answers "why can't I write this?" without a trip through the docs.
 create or replace function wiki.capabilities_at(
   p_document uuid,
-  p_user     uuid default wiki.current_user_id()
+  p_user     uuid
 )
 returns wiki.capability[]
 language sql stable parallel safe as $$
@@ -544,3 +544,96 @@ set search_path = wiki, public, pg_temp as $$
   left join wiki.role      r    on r.id    = winner.role_id
   order by caps.c;
 $$;
+
+
+-------------------------------------------------------------------------------
+-- The self-only forms
+-------------------------------------------------------------------------------
+--
+-- Every function above takes the principal to judge as an argument, which is
+-- what makes them useful to an admin CLI -- and what makes them an oracle in
+-- the hands of anyone who should not have one. Executing has_capability(doc,
+-- 'read', <anybody>) answers a question about a stranger, as the owner, with
+-- RLS out of the picture. That is why 950_lockdown.sql revokes EXECUTE from
+-- PUBLIC and why 040_grants_test.sql asserts it stayed revoked.
+--
+-- These are the same questions asked only about the caller. The principal is
+-- not a parameter, it is wiki.current_user_id(), which comes from the verified
+-- token and cannot be influenced by the caller. There is no argument here to
+-- lie in.
+--
+-- They exist as separate *overloads* rather than as a default argument because
+-- in PostgreSQL an overload is its own pg_proc row with its own ACL, and a
+-- default argument is not: granting EXECUTE on a function grants its whole
+-- signature, defaults included. So the defaults came off the forms above, and
+-- an unauthenticated caller can be handed exactly these five and nothing that
+-- would let it ask about anyone else.
+--
+-- Nothing had to change at the call sites. The policies in 050_rls.sql and the
+-- views in 070_views.sql were already calling the short arities and letting
+-- the default supply the caller; those calls now resolve here instead, to the
+-- same answer by the same route.
+--
+-- SECURITY DEFINER on the wrappers, so that holding one of these does not also
+-- require holding the long form it delegates to -- which would give back the
+-- oracle in the same breath as taking it away.
+
+create or replace function wiki.can(
+  p_path      ltree,
+  p_is_folder boolean,
+  p_owner     uuid,
+  p_cap       wiki.capability
+)
+returns boolean
+language sql stable security definer parallel safe
+set search_path = wiki, public, pg_temp as $$
+  select wiki.can(p_path, p_is_folder, p_owner, p_cap, wiki.current_user_id());
+$$;
+
+create or replace function wiki.can_traverse(
+  p_path ltree,
+  p_cap  wiki.capability default 'read'
+)
+returns boolean
+language sql stable security definer parallel safe
+set search_path = wiki, public, pg_temp as $$
+  select wiki.can_traverse(p_path, p_cap, wiki.current_user_id());
+$$;
+
+create or replace function wiki.can_traverse(
+  p_document uuid,
+  p_cap      wiki.capability default 'read'
+)
+returns boolean
+language sql stable security definer parallel safe
+set search_path = wiki, public, pg_temp as $$
+  select wiki.can_traverse(p_document, p_cap, wiki.current_user_id());
+$$;
+
+create or replace function wiki.has_capability(
+  p_document uuid,
+  p_cap      wiki.capability
+)
+returns boolean
+language sql stable security definer parallel safe
+set search_path = wiki, public, pg_temp as $$
+  select wiki.has_capability(p_document, p_cap, wiki.current_user_id());
+$$;
+
+-- Invoker, like the form it shadows: it reads no table of its own, and every
+-- question it asks goes through the self-only has_capability() above.
+create or replace function wiki.capabilities_at(p_document uuid)
+returns wiki.capability[]
+language sql stable parallel safe
+set search_path = wiki, public, pg_temp as $$
+  select coalesce(array_agg(c order by c), '{}')
+    from unnest(enum_range(null::wiki.capability)) c
+   where wiki.has_capability(p_document, c);
+$$;
+
+comment on function wiki.can(ltree, boolean, uuid, wiki.capability) is
+  'May the caller do this here? The five-argument form asks about someone else '
+  'and is not granted to unauthenticated callers.';
+comment on function wiki.capabilities_at(uuid) is
+  'Everything the caller may do at a document. The two-argument form asks '
+  'about someone else and is not granted to unauthenticated callers.';
