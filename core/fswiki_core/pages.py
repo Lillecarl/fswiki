@@ -191,11 +191,18 @@ class Pages:
 
     # -- reads -------------------------------------------------------------
 
-    async def manifest(self) -> list[dict]:
-        return await self._client.manifest()
+    async def outline(self) -> list[dict]:
+        """The tree: path and kind, for the index and for resolving links.
+
+        Deliberately not manifest(). Nothing on a rendered page needs the
+        capabilities column, and fetching it costs an ACL walk per capability
+        per document -- 224 ms against 38 ms on the dev fixtures, which is most
+        of what a page used to cost.
+        """
+        return await self._client.outline()
 
     async def visible(self) -> set[str]:
-        return {row["path"] for row in await self.manifest()}
+        return {row["path"] for row in await self.outline()}
 
     async def change_token(self) -> str:
         """The change token, for the reload poll. Eleven bytes."""
@@ -246,7 +253,7 @@ class Pages:
         return 200, self.shell(naming.to_display(path), body, path, state)
 
     async def index(self) -> str:
-        rows = sorted(await self.manifest(), key=lambda r: r["path"])
+        rows = sorted(await self.outline(), key=lambda r: r["path"])
         items = []
         for row in rows:
             display = naming.to_display(row["path"])
