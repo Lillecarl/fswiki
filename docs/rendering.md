@@ -340,7 +340,11 @@ machine caches the same bytes. Issue #12 has the measurements.
 
 Both limits go in each backend's `options`, beside the highlighter version, for
 the reason the version is there: they decide what a page comes back holding, so
-the cache key has to move with them.
+the cache key has to move with them. `FSWIKI_HIGHLIGHT_BLOCK_BYTES` and
+`FSWIKI_HIGHLIGHT_PAGE_BYTES` move them, once, at import — a limit that could
+change afterwards would change what a page holds without changing the key it is
+cached under. Either set to `0` turns highlighting off, which is a value rather
+than a special case: every block is then over the limit.
 
 **Both markdown engines colour the same fence the same way**, byte for byte,
 because `render.highlight.block` writes the wrapper once for both. docutils

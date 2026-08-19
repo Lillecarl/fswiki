@@ -369,3 +369,57 @@ def test_outside_a_page_there_is_no_budget():
     for _ in range(20):
         assert highlight.to_html(body[:highlight.MAX_LENGTH], "python") != "" \
             or not HAS_PYGMENTS
+
+
+# --- the limits, and where they come from -----------------------------------
+
+@pytest.mark.parametrize("raw,expected", [
+    (None, 4096),          # unset
+    ("1024", 1024),
+    ("0", 0),              # off, which is a value rather than a special case
+    ("-1", 0),             # nonsense, clamped rather than refused
+    ("", 4096),            # set-but-empty, which shells produce by accident
+    ("4k", 4096),          # a typo: warn and carry on
+    ("lots", 4096),
+])
+def test_a_limit_is_read_from_the_environment(monkeypatch, raw, expected):
+    """A typo that silently does nothing is worse than one that stops the
+    program -- but not worse than a wiki that will not start. It warns."""
+    monkeypatch.delenv("FSWIKI_TEST_LIMIT", raising=False)
+    if raw is not None:
+        monkeypatch.setenv("FSWIKI_TEST_LIMIT", raw)
+    assert highlight._limit("FSWIKI_TEST_LIMIT", 4096) == expected
+
+
+@needs_pygments
+def test_a_block_limit_of_zero_turns_highlighting_off(monkeypatch):
+    """The honest way to say so: every block is over the limit, so every block
+    renders plain, and the renderer id says which."""
+    monkeypatch.setattr(highlight, "MAX_LENGTH", 0)
+    assert highlight.to_html(PYTHON, "python") == ""
+    assert "return" in text_of(highlight.block(PYTHON, "python"))
+
+
+@needs_pygments
+def test_a_page_budget_of_zero_does_too(monkeypatch):
+    """Either variable is enough on its own."""
+    monkeypatch.setattr(highlight, "PAGE_BUDGET", 0)
+    with highlight.page():
+        assert highlight.to_html(PYTHON, "python") == ""
+
+
+@needs_pygments
+def test_two_limits_are_two_renderer_ids(monkeypatch):
+    """The point of the whole exercise. Two deployments with different limits
+    hold different bytes for the same revision, so they must not share a cache
+    key -- and the key has to move by itself rather than because somebody
+    remembered to move it."""
+    from fswiki_core.render import builtin, registry
+
+    monkeypatch.setattr(highlight, "MAX_LENGTH", 4096)
+    a = registry.config_digest(builtin.MarkdownItBackend())
+    monkeypatch.setattr(highlight, "MAX_LENGTH", 1024)
+    b = registry.config_digest(builtin.MarkdownItBackend())
+    monkeypatch.setattr(highlight, "PAGE_BUDGET", 1024)
+    c = registry.config_digest(builtin.MarkdownItBackend())
+    assert len({a, b, c}) == 3, (a, b, c)

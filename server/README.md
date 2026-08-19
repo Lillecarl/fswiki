@@ -83,6 +83,13 @@ mount talk to it directly. This program only owns its lifetime.
 | `FSWIKI_POSTGREST_HOST`, `FSWIKI_POSTGREST_PORT`, `FSWIKI_POSTGREST_BIN` | that one |
 | `FSWIKI_JWT_SECRET` | passed to PostgREST, which is what verifies tokens |
 | `FSWIKI_RENDER_CACHE_BYTES` | rendered bodies held in this process; `0` turns it off. Nothing in it is ever invalidated — a revision's content cannot change — so this is a memory bound and not a staleness one. Default 32 MiB |
+| `FSWIKI_HIGHLIGHT_BLOCK_BYTES` | the most one code block may colour; a longer one renders plain. Default 4 KiB, which is eleven times the largest block in this repository's own documentation |
+| `FSWIKI_HIGHLIGHT_PAGE_BYTES` | the most one *page* may colour, across all its blocks. Default 32 KiB. The block limit bounds a block and says nothing about a page: 200 blocks at the block limit was 822 kB of source and 8.7 seconds of render. Either variable set to `0` turns highlighting off |
+
+Both highlighting limits are read once, at import, and both travel in the
+renderer id — so two deployments with different limits cannot share a cached
+body for the same revision. They decide what a page comes back holding, which
+makes them part of what produced it. See [docs/rendering.md](../docs/rendering.md).
 
 **There is no login yet.** A visitor's token is read from a `fswiki_session`
 cookie or an `Authorization: Bearer` header and passed through; without one

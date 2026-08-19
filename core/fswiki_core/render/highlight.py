@@ -30,7 +30,38 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import logging
+import os
 from html import escape
+
+log = logging.getLogger(__name__)
+
+
+def _limit(name: str, default: int) -> int:
+    """One byte limit, from the environment, once.
+
+    Read at import and never again, because both limits reach the renderer id
+    through each backend's `options` and a backend reads its options when it is
+    built. A limit that could move afterwards would change what a page holds
+    without changing the key it is cached under, which is the one failure the
+    id exists to prevent.
+
+    A value that is not a number is a typo, and a typo that silently does
+    nothing is worse than one that stops the program -- but not worse than a
+    wiki that will not start. It warns and uses the default.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning("%s=%r is not a number; using %d", name, raw, default)
+        return default
+    if value < 0:
+        log.warning("%s=%d is negative; using 0", name, value)
+        return 0
+    return value
 
 #: The longest block this colours. Longer ones stay plain.
 #:
@@ -43,7 +74,9 @@ from html import escape
 #:
 #: 4 kB is eleven times the largest code block in this repository's own
 #: documentation, whose median block is 158 bytes.
-MAX_LENGTH = 4096
+#: `0` turns highlighting off, which is the honest way to say so: every block
+#: is then over the limit and renders plain, and the renderer id says which.
+MAX_LENGTH = _limit("FSWIKI_HIGHLIGHT_BLOCK_BYTES", 4096)
 
 #: The most a single page may colour, across all its blocks.
 #:
@@ -69,7 +102,9 @@ MAX_LENGTH = 4096
 #: 158 B and a largest page of 14.7 kB in this repository's own documentation.
 #: Measured, at 1.3 us/byte for ordinary code and 10 us/byte for the worst
 #: input in issue #9: 43 ms typical, 328 ms worst.
-PAGE_BUDGET = 32768
+#:
+#: `0` turns highlighting off here too, and either variable is enough.
+PAGE_BUDGET = _limit("FSWIKI_HIGHLIGHT_PAGE_BYTES", 32768)
 
 #: What is left of the current page's budget, or None outside a page.
 #:
