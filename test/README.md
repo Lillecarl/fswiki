@@ -44,9 +44,11 @@ The mount tests are marked, and they are marked precisely so that this works.
 
     nix build --file . tests.check -L
 
-121 tests, about fifteen seconds, entirely inside a pure Nix build. That covers
-the render seam, the client, the audit queue, the SQL suite, the audit trail
-over HTTP and impersonation over HTTP.
+400 tests, about twenty seconds, entirely inside a pure Nix build. That is
+every pure unit below, plus the client, the SQL suite, the audit trail over
+HTTP and impersonation over HTTP. Two skip themselves there: the filesystem
+under the build's `$TMPDIR` may not carry user extended attributes, and
+`test_paths.py` says so rather than guessing.
 
 Two things were measured rather than assumed. **Loopback works**: the sandbox's
 `lo` is up with 127.0.0.1 and binds and connects fine, so Postgres and PostgREST
@@ -68,23 +70,52 @@ it.
 
 ## What is where
 
+Pure units first — no stack, no network, no mount, milliseconds each:
+
 | file | what it covers |
 | --- | --- |
+| `test_naming.py` | filenames to slugs and back, which everything else assumes |
+| `test_merge_algorithm.py` | the three-way merge as a function, marker growth included |
+| `test_links.py` | wikilink rewriting, and forbidden ≡ missing |
+| `test_paths.py` | the three ways a human names one document |
+| `test_model.py` | folding drafts over the manifest into one tree |
+| `test_inodes.py` | inode stability and the kernel's lookup counting |
+| `test_procinfo.py` | reading /proc, and never shipping what was in argv |
+| `test_report.py` | every word the CLI prints |
+| `test_audit_queue.py` | the audit queue as a queue: cap, batching, recovery |
 | `test_render.py` | the render seam, against every registered backend |
+
+Then against a live stack:
+
+| file | what it covers |
+| --- | --- |
 | `test_backends.py` | the client under both asyncio and trio |
-| `test_client.py` | `fswiki_core.client` against real PostgREST |
+| `test_client.py` | reading, and never from `current_document` |
+| `test_client_drafts.py` | drafts, push, revisions and the merge RPCs |
+| `test_client_transport.py` | the transport impersonation forces, and how it fails |
 | `test_sql.py` | the in-database suite, in a database of its own |
 | `test_audit.py` | the access trail over HTTP |
 | `test_impersonation.py` | `--as` / `--as-group` over HTTP |
 | `test_cli.py` | `fswiki` — status, diff, push, revert, render |
-| `test_merge.py` | the three-way merge, end to end through the mount |
+| `test_cli_impersonation.py` | `fswiki --as`, including that it cannot write |
+| `test_preview.py` | `fswiki preview` |
+
+And through a real mount:
+
+| file | what it covers |
+| --- | --- |
 | `test_mount.py` | the filesystem itself |
+| `test_merge.py` | the three-way merge, end to end through the mount |
 | `test_mount_audit.py` | `fswiki-mount --audit`, including offline spooling |
 | `test_mount_offline.py` | what the mount does when the server goes away |
 | `test_mount_impersonation.py` | `fswiki-mount --as` |
-| `test_cli_impersonation.py` | `fswiki --as`, including that it cannot write |
-| `test_audit_queue.py` | the audit queue as a queue: cap, batching, recovery |
-| `test_preview.py` | `fswiki preview` |
+
+The split is not filing. A unit test that reaches the awkward case in one dict
+and an end-to-end test that proves the wiring is real are answering different
+questions, and neither substitutes for the other: `test_merge.py` cannot
+cheaply ask what happens to a page that already contains conflict markers, and
+`test_merge_algorithm.py` cannot tell you whether the draft's `base_version`
+was recorded from the revision the reader actually read.
 
 ## How it is put together
 
@@ -125,6 +156,23 @@ case and the only version that fails with a useful message.
 written against anyio so that the same code runs under trio inside the FUSE
 mount and under asyncio everywhere else; `test_backends.py` overrides one
 fixture and runs against both, which is the whole reason to pick this plugin.
+
+## Measuring it
+
+    FSWIKI_COVERAGE=1 nix run --file . tests
+
+Off by default, because it is a measurement rather than a test. What it exists
+for is the four largest modules in the project — `fuse/fs.py`, both
+`__main__.py`, and `preview.py` — which only ever run in a **subprocess**. An
+ordinary in-process coverage run reports every one of them as zero however
+thoroughly the mount and CLI tests exercise them, which is the same number an
+untested module gets and therefore worse than no number at all.
+
+The mode sets `COVERAGE_PROCESS_START` and puts a `sitecustomize.py` and a
+`coverage` package on `PYTHONPATH`, so every child interpreter starts measuring
+itself, and combines the results at the end. The CLI, the mount and the preview
+server each run in their own Nix python environment, which is why `coverage`
+has to be put on the path rather than assumed to be installed.
 
 ## The other suite
 
