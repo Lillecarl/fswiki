@@ -8,3 +8,6 @@
 # Python bytecode from running the modules straight out of the tree
 __pycache__/
 *.pyc
+
+# pytest's own scratch
+.pytest_cache/
