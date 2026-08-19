@@ -45,7 +45,7 @@ expensive.
 | a typical fixture page (~800 B) | **0.62 ms** | the fixtures run 22 B – 430 B |
 | this repo's `audit-trail.md` (14.7 kB) | **9.00 ms** | a long page, by wiki standards |
 | sanitising the output (nh3) | 0.59 ms | |
-| one code block through pygments | 1.81 ms | |
+| one code block, coloured | 0.19 ms | pygments, on this repo's largest block |
 | one maths expression to MathML | 0.32 ms | `latex2mathml`, in-process |
 | **a cache hit** | **2.55 µs** | 1.93 µs to build the key, 0.62 µs to look it up |
 
@@ -282,11 +282,72 @@ That is why this was a smaller decision than allowing SVG. MathML has no
 scripting element, nothing that navigates, and no `foreignObject` to smuggle
 HTML through.
 
+### Syntax highlighting, and the stylesheet nobody mentions
+
+Code blocks are coloured by **pygments**, in this process, behind one function
+that never raises. A block that cannot be coloured is a plain block: an unknown
+language, an absent pygments, a block over the cap and a lexer that throws are
+four reasons and one behaviour.
+
+**The sanitiser needed no change at all.** That is the whole difference from
+maths. Highlighting emits `span` carrying `class`, and both were already
+allowed, so `PIPELINE_VERSION` stays where it was. What moves the cache key
+instead is `highlight.version()` in every backend's options — because a
+deployment with pygments and one without produce different bytes for the same
+revision, and they must not share a key.
+
+Two decisions are worth stating, and both are about inputs written by one user
+and read by another:
+
+- **The language comes from the fence and from nowhere else.** `guess_lexer`
+  took **293 ms** on hostile input to conclude "Text only", and a wrong guess is
+  worse than no colour. It is never called.
+- **One block is capped at 4 kB.** Neither pygments nor tree-sitter is
+  interruptible from Python, so a cap is the only bound there is. It bounds the
+  constant rather than the order: everything stayed linear, but the cost per
+  byte varies by an order of magnitude with what the block holds.
+
+| 4 kB of | cost |
+| --- | --- |
+| ordinary Python (1.3 µs/B) | 3.7 ms |
+| solid punctuation (10 µs/B) | 39.6 ms |
+
+4 kB is eleven times the largest code block in this repository's own
+documentation, whose median block is 158 B.
+
+**Both markdown engines colour the same fence the same way**, byte for byte,
+because `render.highlight.block` writes the wrapper once for both. docutils
+does its own highlighting, and `syntax_highlight` is set to `short` rather than
+`long` for one reason: the short names are the ones pygments' own HTML
+formatter emits, so the two paths need one stylesheet between them rather than
+two. It degrades by itself — docutils raises `LexerError` when pygments is
+absent or the language is unknown, and re-lexes without colour because
+`report_level` is above 2.
+
+**The cost nobody mentions is the stylesheet.** Class-based output means
+nothing without CSS, and these pages render in both schemes.
+`get_style_defs()` for two schemes is **8,853 B**, against a page stylesheet
+that was 3,579 B — pygments' own would have made it three and a half times the
+size. The rules in `fswiki_core.pages` are **2,168 B** and make it one and a
+half: the classes twelve languages actually emit, grouped by what they
+mean rather than by which lexer produced them, with punctuation, whitespace and
+plain names left the colour of the surrounding text. A class with no rule is a
+token nobody notices, so `test_render_highlight.py` fails when a language emits
+one that is neither styled nor deliberately plain.
+
+**tree-sitter is the better engine and is not, as packaged for Python, a
+highlighter.** It parses 6.4× faster than pygments lexes, and
+`tree-sitter-language-pack` ships 248 compiled grammars and not one
+`highlights.scm`. Turning a tree into `<span class="k">` needs a query per
+language and a capture-name mapping, and neither is in the box. So the cheap
+engine went first, behind a hook, and issue #9 holds the measurements for
+swapping it.
+
 ### The renderer is part of the cache key
 
 `Rendered.renderer` identifies the whole pipeline, not just the engine:
 
-    markdown-it-py/4.2.0+cfgfff05eca+fswiki4
+    markdown-it-py/4.2.0+cfg423e12e8+fswiki4
 
 That goes in the cache key beside `(document_id, version)`. Leave it out and
 switching engines — or upgrading one — quietly serves output that the code now

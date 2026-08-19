@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 
-from . import maths
+from . import highlight, maths
 from .registry import register
 
 log = logging.getLogger(__name__)
@@ -29,12 +29,50 @@ def _convert(latex: str, options: dict) -> str:
     return maths.to_mathml(latex, block=options["display_mode"])
 
 
+def _language(info: str | None) -> str:
+    """The language named by a fence, which is the first word of its info.
+
+    ```` ```python title=x ```` names python. Both engines already agree on
+    that, so this only has to agree with them.
+    """
+    return info.strip().split(maxsplit=1)[0] if info and info.strip() else ""
+
+
+def _highlight(code: str, lang: str, attrs: str) -> str:
+    """The hook markdown-it takes. A return starting with `<pre` is used as
+    it stands, which is what lets one function serve both engines."""
+    return highlight.block(code, lang)
+
+
 def _inline_math(renderer, latex: str) -> str:
     return f'<span class="math inline">{maths.to_mathml(latex)}</span>'
 
 
 def _block_math(renderer, latex: str) -> str:
     return f'<div class="math block">{maths.to_mathml(latex, block=True)}</div>\n'
+
+
+def _highlighting_renderer(mistune, escape: bool):
+    """mistune's HTML renderer, with fenced blocks coloured.
+
+    A subclass rather than `renderer.register("block_code", ...)`, which is
+    how the maths hooks are installed a few lines below. The difference is
+    real: mistune looks a token type up as an attribute first and only falls
+    back to what was registered, so registering over a method that already
+    exists does nothing at all. `inline_math` is not a method; `block_code`
+    is.
+
+    Defined here rather than at module level because mistune is an optional
+    dependency, and a class statement cannot wait for an import that may
+    never happen.
+    """
+
+    class HighlightingRenderer(mistune.HTMLRenderer):
+        def block_code(self, code: str, info: str | None = None) -> str:
+            # The trailing newline is mistune's own convention between blocks.
+            return highlight.block(code, _language(info)) + "\n"
+
+    return HighlightingRenderer(escape=escape)
 
 
 class MarkdownItBackend:
@@ -70,14 +108,18 @@ class MarkdownItBackend:
         self.version = markdown_it.__version__
         # html=False is the first of the two layers described in safety.py.
         self._md = markdown_it.MarkdownIt(
-            self.options["preset"], {"html": self.options["html"]})
+            self.options["preset"],
+            {"html": self.options["html"], "highlight": _highlight})
         for extension in self.options["enable"]:
             self._md.enable(extension)
         self._md.use(dollarmath_plugin, renderer=_convert,
                      **self.options["dollarmath"])
-        # Which maths converter is installed changes the bytes, so it goes in
-        # the id beside the options that produced them.
-        self.options = self.options | {"maths": maths.version()}
+        # Which maths converter and which highlighter are installed change
+        # the bytes, so they go in the id beside the options that produced
+        # them. Both are None when the library is absent, which is a distinct
+        # key rather than the same one holding different output.
+        self.options = self.options | {"maths": maths.version(),
+                                       "highlight": highlight.version()}
 
     def to_html(self, text: str) -> str:
         return self._md.render(text)
@@ -98,14 +140,17 @@ class MistuneBackend:
         import mistune
 
         self.version = mistune.__version__
-        self._md = mistune.create_markdown(**self.options)
+        self._md = mistune.create_markdown(
+            renderer=_highlighting_renderer(mistune, self.options["escape"]),
+            plugins=self.options["plugins"])
         # mistune's math plugin parses `$...$` and then writes the LaTeX back
         # out untouched. These two convert it instead, in the wrapper
         # mdit-py-plugins uses, so the engines differ in what they accept and
         # not in what they emit.
         self._md.renderer.register("inline_math", _inline_math)
         self._md.renderer.register("block_math", _block_math)
-        self.options = self.options | {"maths": maths.version()}
+        self.options = self.options | {"maths": maths.version(),
+                                       "highlight": highlight.version()}
 
     def to_html(self, text: str) -> str:
         return self._md(text)
@@ -157,14 +202,20 @@ class RstBackend:
         "report_level": 5,
         "halt_level": 5,
         "embed_stylesheet": False,
-        # Off because pygments is a dependency this backend does not
-        # otherwise need, and for no other reason. Not because the output
-        # would not survive: measured on docutils 0.23 with pygments 2.20,
-        # `short` and `long` emit 13 classes and *zero* inline style
-        # attributes, and all 13 come through `safety.clean()` intact --
-        # `span` and `class` are already allowed. Turning this on is one
-        # setting and no sanitiser change. See issue #9.
-        "syntax_highlight": "none",
+        # `short` and not `long`, because the short names are the ones
+        # pygments' own HTML formatter emits -- so the markdown path and this
+        # one need one stylesheet between them rather than two. Measured on
+        # docutils 0.23 with pygments 2.20: zero inline style attributes, and
+        # every class comes through `safety.clean()` intact, because `span`
+        # and `class` were already allowed.
+        #
+        # It degrades by itself. docutils raises LexerError when pygments is
+        # absent or the language is unknown, and re-lexes with 'none' when
+        # `report_level` is above 2 -- which it is, two lines up. So this
+        # setting is safe to state unconditionally, and `highlight.version()`
+        # in the options below is what moves the cache key when the answer
+        # changes. See render.highlight and issue #9.
+        "syntax_highlight": "short",
         # docutils converts `:math:` to MathML itself, so this backend needs
         # no latex2mathml. Named rather than left to the default because the
         # default has moved: older docutils wrote HTML with a stylesheet, and
@@ -178,6 +229,7 @@ class RstBackend:
 
         self.version = docutils.__version__
         self._publish = publish_parts
+        self.options = self.options | {"highlight": highlight.version()}
 
     def to_html(self, text: str) -> str:
         # `writer=` and not `writer_name=`: the latter is pending removal in

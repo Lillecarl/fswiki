@@ -12,6 +12,8 @@ flags above it can be set to False and mean nothing.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from fswiki_core import naming, render
@@ -51,7 +53,10 @@ def test_the_things_people_choose_rst_for_survive():
 """)
     assert "Mind the gap." in html
     assert "<aside" in html, "the admonition lost its structure to the sanitiser"
-    assert "return 1" in html
+    # `return` and `1` are in separate spans now, so the source is only there
+    # once the tags come off. Which is the point: the block is coloured.
+    assert "return 1" in re.sub(r"<[^>]+>", "", html)
+    assert '<span class="k">return</span>' in html
 
 
 def test_a_table_survives():

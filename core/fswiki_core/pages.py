@@ -105,6 +105,51 @@ tbody tr:last-child td { border-bottom: 0; }
 tt.math { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
           font-size: .875em; color: var(--dim); }
 
+/* Syntax highlighting. pygments' short class names, which is also what
+   docutils emits with syntax_highlight="short" -- so one set of rules covers
+   markdown and reStructuredText both. See render.highlight.
+
+   Trimmed on purpose, and measured: `get_style_defs()` for two schemes is
+   8,853 B, against the 2,168 B here. This stylesheet was 3,579 B, so
+   pygments' own would have made it three and a half times the size and this
+   makes it one and a half. These are the classes twelve languages actually
+   emitted, grouped by what they mean rather than by which lexer produced
+   them, and anything unlisted keeps the colour of the surrounding text --
+   which is the right way for this to be wrong. Scoped under `pre`, so a
+   `class="k"` in prose is still prose. */
+:root {
+  --hl-comment: #7a7368; --hl-keyword: #8f4b26; --hl-string: #3f6b46;
+  --hl-number: #7a4c8f; --hl-name: #1f5c7a; --hl-bad: #a02020;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --hl-comment: #8b8781; --hl-keyword: #d99a6c; --hl-string: #9ac48a;
+    --hl-number: #c3a0e0; --hl-name: #7fb2dc; --hl-bad: #e88b8b;
+  }
+}
+pre .c,pre .c1,pre .cm,pre .ch,pre .cs,pre .cp,pre .cpf
+  { color: var(--hl-comment); font-style: italic; }
+pre .k,pre .kc,pre .kd,pre .kn,pre .kp,pre .kr,pre .kt,pre .ow
+  { color: var(--hl-keyword); }
+pre .s,pre .s1,pre .s2,pre .sa,pre .sb,pre .sc,pre .sd,pre .se,pre .sh,
+pre .si,pre .sr,pre .ss,pre .sx,pre .dl,pre .l
+  { color: var(--hl-string); }
+pre .m,pre .mb,pre .mf,pre .mh,pre .mi,pre .mo,pre .il
+  { color: var(--hl-number); }
+pre .nf,pre .nc,pre .nn,pre .nd,pre .ne,pre .fm,pre .nt,pre .na
+  { color: var(--hl-name); }
+pre .nb,pre .bp,pre .no,pre .nv,pre .vc,pre .vg,pre .vi
+  { color: var(--hl-name); opacity: .85; }
+/* A lexer says `err` where it lost track. Underlined rather than shouted:
+   an author's half-written line is not an error the reader has to act on. */
+pre .err { color: var(--hl-bad); text-decoration: underline wavy; }
+/* Diffs are read as a whole, so these carry the line and not just a token. */
+pre .gd { color: var(--hl-bad); }
+pre .gi { color: var(--hl-string); }
+pre .gh,pre .gu { color: var(--hl-comment); font-weight: 600; }
+pre .ge { font-style: italic; }
+pre .gs { font-weight: 600; }
+
 /* The index. Indentation carries the tree, so nothing else has to. */
 ul.tree { list-style: none; padding: 0; font-family: ui-sans-serif, system-ui, sans-serif;
           font-size: .95rem; }

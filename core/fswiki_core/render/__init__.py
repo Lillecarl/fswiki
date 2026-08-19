@@ -3,7 +3,7 @@
     >>> from fswiki_core import render
     >>> page = render.render("# Hi\n\nsee [[public/welcome]]")
     >>> page.renderer
-    'markdown-it-py/4.2.0+cfgfff05eca+fswiki4'
+    'markdown-it-py/4.2.0+cfg423e12e8+fswiki4'
 
 The pipeline is three steps and only the middle one is pluggable:
 
@@ -27,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import builtin as _builtin  # noqa: F401 - registers the shipped backends
-from . import cache, links, safety
+from . import cache, highlight, links, safety
 from .registry import (
     PIPELINE_VERSION,
     Backend,
@@ -40,7 +40,7 @@ from .registry import (
 
 __all__ = [
     "Backend", "Rendered", "UnknownBackend", "available", "cache", "get",
-    "links", "register", "render", "renderer_id", "safety",
+    "highlight", "links", "register", "render", "renderer_id", "safety",
 ]
 
 

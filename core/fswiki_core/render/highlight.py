@@ -1,0 +1,122 @@
+"""Colouring code blocks, in this process. pygments, behind one function.
+
+The engine is behind a hook for the same reason the backends are: this is a
+choice about appearance, and it should be replaceable without touching
+anything that decides what a reader may see. Issue #9 measured tree-sitter at
+6.4x pygments and found it ships no highlight queries at all, so the cheap
+engine goes first and the fast one gets measured against it later.
+
+pygments is 598 lexers of Python regexes. Two things follow, and both are
+decisions rather than defaults:
+
+**The language comes from the fence and from nowhere else.** `guess_lexer`
+took 293 ms on hostile input to conclude "Text only", and a wrong guess is
+worse than no colour. An unknown language is a plain block.
+
+**One block is capped.** Neither engine is interruptible from Python, so a
+cap is the only bound there is. See `MAX_LENGTH`.
+
+The sanitiser needs no change for any of this: the output is `span` carrying
+`class`, and both were already allowed. That is the whole difference from
+maths (#7), which was foreign content and got dropped whole until it was
+listed.
+
+Cost, on this host: 0.10 ms for 256 B, 3.7 ms at the 4 kB cap, for ordinary
+Python. A page of prose renders in 0.62 ms, so one long block is the most
+expensive thing on a page -- which is what the render cache is for.
+"""
+
+from __future__ import annotations
+
+from html import escape
+
+#: The longest block this colours. Longer ones stay plain.
+#:
+#: Not a correctness limit: pygments is linear, and every pathological input
+#: in issue #9 stayed linear too. It bounds the constant, which varies by two
+#: orders of magnitude with what the block contains. Measured per byte:
+#:
+#:     ordinary Python      1.3 us      4 kB ->  3.7 ms
+#:     solid punctuation   10.0 us      4 kB -> 40.0 ms
+#:
+#: 4 kB is eleven times the largest code block in this repository's own
+#: documentation, whose median block is 158 bytes.
+MAX_LENGTH = 4096
+
+_highlighter: tuple = ()
+
+
+def _load() -> tuple:
+    """Import pygments once, and remember it if it is absent."""
+    global _highlighter
+    if not _highlighter:
+        try:
+            import pygments
+            from pygments.formatters.html import HtmlFormatter
+            from pygments.lexers import get_lexer_by_name
+            from pygments.util import ClassNotFound
+        except ImportError:
+            _highlighter = (None, None, None, None, None)
+        else:
+            # nowrap: the spans and nothing else. The <pre><code> around them
+            # is the markdown engine's, so a highlighted block and a plain one
+            # are the same element with the same classes on it.
+            _highlighter = (pygments.highlight, get_lexer_by_name,
+                            HtmlFormatter(nowrap=True), ClassNotFound,
+                            pygments.__version__)
+    return _highlighter
+
+
+def version() -> str | None:
+    """pygments' version, or None when it is not installed.
+
+    Every backend puts this in its options, so it reaches the renderer id and
+    therefore the cache key. Without it, a page rendered with the highlighter
+    present and the same page rendered without it share a key while holding
+    different bytes, and a reader gets whichever was stored first.
+    """
+    return _load()[4]
+
+
+def to_html(code: str, lang: str) -> str:
+    """Colour one block. Returns the inner HTML, or "" to leave it plain.
+
+    "" rather than an exception, and "" rather than the escaped source,
+    because every caller already knows how to write a plain block and each
+    engine writes its own. Never raises.
+    """
+    colour, get_lexer, formatter, not_found, _ = _load()
+    if colour is None or not lang or len(code) > MAX_LENGTH:
+        return ""
+    try:
+        # A lexer per call, rather than a memoised one. Measured: building it
+        # is 0.046 ms against 0.525 ms of lexing, so the cache would buy 9%
+        # and would share one object's state across whatever threads a
+        # deployment renders on. A miss costs 0.066 ms, so a page of unknown
+        # fences does not amplify either.
+        lexer = get_lexer(lang)
+    except not_found:
+        # An unknown language is an ordinary case: somebody wrote ```notalang,
+        # or a lexer this deployment does not have. A plain block is the
+        # honest answer, and it is the one both engines produce anyway.
+        return ""
+    except Exception:
+        return ""
+    try:
+        return colour(code, lexer, formatter)
+    except Exception:
+        # A lexer is a few hundred regexes written by somebody else. If one of
+        # them raises, this block is not coloured and the page is still a page.
+        return ""
+
+
+def block(code: str, lang: str) -> str:
+    """A whole code block, in the shape both markdown engines already emit.
+
+    Written once here rather than twice in `builtin`, because "both engines
+    colour the same fence the same way" is the property the conformance suite
+    checks and this is the cheapest way to make it true by construction.
+    """
+    inner = to_html(code, lang) or escape(code, quote=False)
+    attr = f' class="language-{escape(lang)}"' if lang else ""
+    return f"<pre><code{attr}>{inner}</code></pre>"

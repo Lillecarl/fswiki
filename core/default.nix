@@ -27,12 +27,15 @@ python3Packages.buildPythonPackage {
     # LaTeX maths to MathML, in-process. Optional even here: without it an
     # expression renders as its source rather than as maths.
     python3Packages.latex2mathml
+    # Colouring code blocks. Optional the same way: without it a fenced block
+    # is a plain one. docutils uses it too, for `.. code::`.
+    python3Packages.pygments
   ];
 
   pythonImportsCheck = [
     "fswiki_core" "fswiki_core.client" "fswiki_core.naming" "fswiki_core.merge"
     "fswiki_core.render" "fswiki_core.render.links" "fswiki_core.render.registry"
-    "fswiki_core.render.maths"
+    "fswiki_core.render.maths" "fswiki_core.render.highlight"
     "fswiki_core.pages"
   ];
 
