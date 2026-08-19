@@ -27,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import builtin as _builtin  # noqa: F401 - registers the shipped backends
-from . import links, safety
+from . import cache, links, safety
 from .registry import (
     PIPELINE_VERSION,
     Backend,
@@ -39,8 +39,8 @@ from .registry import (
 )
 
 __all__ = [
-    "Backend", "Rendered", "UnknownBackend", "available", "get", "links",
-    "register", "render", "safety",
+    "Backend", "Rendered", "UnknownBackend", "available", "cache", "get",
+    "links", "register", "render", "renderer_id", "safety",
 ]
 
 
@@ -73,6 +73,17 @@ def render(text: str, *, content_type: str = "text/markdown",
         renderer=_renderer_id(chosen),
         content_type=content_type,
     )
+
+
+def renderer_id(content_type: str = "text/markdown",
+                backend: str | None = None) -> str:
+    """What `render()` would stamp on the output, without rendering anything.
+
+    The cache key needs it before there is anything to render. Raises the same
+    `UnknownBackend` that `render()` would, so a caller that asks for the key
+    first learns about a missing engine at the same point either way.
+    """
+    return _renderer_id(get(content_type, backend))
 
 
 def _renderer_id(backend) -> str:

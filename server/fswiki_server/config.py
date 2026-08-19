@@ -15,6 +15,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from fswiki_core.render import cache as render_cache
+
 # A 64-bit constant, held for the whole of the migration phase. Two servers
 # starting at once -- a restart overlapping its predecessor, a rolling deploy,
 # or someone running it twice -- would otherwise race to load the same schema.
@@ -86,6 +88,12 @@ class Config:
     # every policy in 050_rls.sql, because owners are not subject to RLS.
     postgrest_database_url: str | None = None
 
+    # Rendered bodies held in this process. The key is immutable -- a
+    # revision's content never changes -- so nothing here is ever invalidated,
+    # only evicted. 0 turns it off, which is a supported answer rather than a
+    # broken one: rendering is a couple of per cent of a page.
+    render_cache_bytes: int = render_cache.DEFAULT_MAX_BYTES
+
     @property
     def postgrest_url(self) -> str:
         return f"http://{self.postgrest_host}:{self.postgrest_port}"
@@ -112,4 +120,6 @@ class Config:
             postgrest_port=int(e.get("FSWIKI_POSTGREST_PORT", cls.postgrest_port)),
             postgrest_jwt_secret=e.get("FSWIKI_JWT_SECRET"),
             postgrest_database_url=e.get("FSWIKI_POSTGREST_DATABASE_URL"),
+            render_cache_bytes=int(
+                e.get("FSWIKI_RENDER_CACHE_BYTES", cls.render_cache_bytes)),
         )

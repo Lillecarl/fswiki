@@ -29,6 +29,7 @@ import logging
 from fswiki_core import pages as pages_mod
 from fswiki_core.client import ClientPool, PostgrestError, Unreachable
 from fswiki_core.pages import Pages
+from fswiki_core.render import cache as render_cache
 
 from .config import Config
 
@@ -109,6 +110,11 @@ class Application:
         self._config = config
         self._backend = backend
         self._pool = ClientPool()
+        # One per process and shared by every request, which is the only way a
+        # cache of rendered bodies is worth anything. Nothing in it is ever
+        # invalidated: see fswiki_core.render.cache.
+        self.cache = (render_cache.Cache(config.render_cache_bytes)
+                      if config.render_cache_bytes > 0 else None)
 
     async def aclose(self) -> None:
         await self._pool.aclose()
@@ -122,7 +128,8 @@ class Application:
         """
         client = self._pool.client(
             self._config.postgrest_url, token, tree="read")
-        return Pages(client, backend=self._backend, drafts=False), client
+        return Pages(client, backend=self._backend, drafts=False,
+                     cache=self.cache), client
 
     async def __call__(self, scope: dict, receive, send) -> None:
         if scope["type"] == "lifespan":
@@ -189,6 +196,8 @@ class Application:
             if message["type"] == "lifespan.startup":
                 await send({"type": "lifespan.startup.complete"})
             elif message["type"] == "lifespan.shutdown":
+                if self.cache is not None:
+                    log.info("render cache: %s", self.cache.stats())
                 await self.aclose()
                 await send({"type": "lifespan.shutdown.complete"})
                 return

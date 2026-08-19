@@ -147,10 +147,17 @@ class Pages:
 
     def __init__(self, client: Client, *, backend: str | None = None,
                  drafts: bool = False, banner: str | None = None,
-                 live_reload: bool = False) -> None:
+                 live_reload: bool = False,
+                 cache: render.cache.Cache | None = None) -> None:
         self._client = client
         self._backend = backend
         self._drafts = drafts
+        # Shared between requests and owned by whatever built this, because a
+        # cache that lives as long as one page is not a cache. None is a
+        # working configuration, not a degraded one: `fswiki preview` renders
+        # drafts, which have mutable content and no version, so there is no key
+        # to give them.
+        self._cache = cache
         # Set once by whatever constructed this, because the whole failure mode
         # of impersonation is forgetting you are doing it. A page that looks
         # exactly like your own wiki, minus a few things, is indistinguishable
@@ -246,18 +253,43 @@ class Pages:
             state = f"revision {row.get('version')}"
 
         try:
-            rendered = render.render(text, content_type=content_type,
-                                     backend=self._backend)
+            neutral = self._body(text, content_type,
+                                 None if draft is not None else row)
         except (render.UnknownBackend, render.safety.SanitiserUnavailable) as exc:
             return 500, self.shell("Cannot render", f"<p>{html.escape(str(exc))}</p>",
                                    path, None)
 
         visible = await self.visible()
         body = render.links.resolve(
-            rendered.html,
+            neutral,
             lambda target: "/" + naming.to_display(target) if target in visible else None,
         )
         return 200, self.shell(naming.to_display(path), body, path, state)
+
+    def _body(self, text: str, content_type: str, row: dict | None) -> str:
+        """The rendered body with its links still neutral, cached where it can be.
+
+        `row` is the published document, or None for a draft. A draft is never
+        cached: its content is mutable and it has no version, so the key that
+        makes this safe does not exist for it.
+
+        What is stored is this -- the neutral body -- and not the composed page.
+        Link resolution runs per reader afterwards, and caching after it would
+        serve one reader's link graph to another.
+        """
+        key = None
+        if self._cache is not None and row is not None and row.get("version") is not None:
+            key = render.cache.Key(row["id"], row["version"],
+                                   render.renderer_id(content_type, self._backend))
+            stored = self._cache.get(key)
+            if stored is not None:
+                return stored
+
+        rendered = render.render(text, content_type=content_type,
+                                 backend=self._backend)
+        if key is not None:
+            self._cache.put(key, rendered.html)
+        return rendered.html
 
     async def index(self) -> str:
         rows = sorted(await self.outline(), key=lambda r: r["path"])
