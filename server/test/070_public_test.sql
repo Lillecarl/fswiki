@@ -154,7 +154,10 @@ select wiki_test.expect_eq('anon may execute exactly the self-only forms',
         -- included, so this one is not optional. It takes no arguments and
         -- reads only the request headers; the block below is what stops those
         -- headers being worth anything without an account.
-        'pre_request()']);
+        'pre_request()',
+        -- The browser read. Gated on `read` through current_document, takes
+        -- no principal, and writes no audit row for a caller with no account.
+        'view_document(p_document uuid, p_event jsonb)']);
 
 -- The invariant behind that list, stated so it survives the list changing.
 -- Every ACL function that takes a principal is an oracle in the hands of
@@ -334,6 +337,33 @@ select wiki_test.expect_eq('anon: a deny-sync page is still readable',
 select wiki_test.expect_eq('anon: and is absent from the syncable tree',
   (select count(*)::int from wiki.syncable_document
     where path = 'root.bulletin'::ltree), 0);
+
+-- And the point of all of it: the browser read serves that page, which is what
+-- an audit lever is for. The mirroring read is not even reachable from here.
+select wiki_test.expect_eq('anon: view_document serves the deny-sync page',
+  (select content from wiki.view_document(wiki_test.doc('root.bulletin'))),
+  'Contents of Bulletin');
+select wiki_test.expect_denied('anon cannot call the mirroring read',
+  'select * from wiki.read_document(wiki_test.doc(''root.bulletin''))');
+reset role;
+
+-- The same split for someone with an account, on a fixture that has carried a
+-- deny-sync ACE since long before any of this: everyone is denied `sync` on
+-- secret-plans, and bob reads it anyway.
+select wiki_test.login('bob');
+set role fswiki_user;
+
+select wiki_test.expect_eq('bob: may read secret-plans',
+  wiki.has_capability(wiki_test.doc('root.engineering.secret-plans'), 'read'), true);
+select wiki_test.expect_eq('bob: but may not sync it',
+  wiki.has_capability(wiki_test.doc('root.engineering.secret-plans'), 'sync'), false);
+select wiki_test.expect_eq('bob: the browser read serves it',
+  (select count(*)::int from wiki.view_document(
+     wiki_test.doc('root.engineering.secret-plans'))), 1);
+select wiki_test.expect_eq('bob: the mirroring read does not',
+  (select count(*)::int from wiki.read_document(
+     wiki_test.doc('root.engineering.secret-plans'))), 0);
+
 reset role;
 
 ------------------------------------------------------------------------------

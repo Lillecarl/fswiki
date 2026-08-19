@@ -224,9 +224,110 @@ begin
 end;
 $$;
 
-comment on function wiki.read_document(uuid, jsonb) is
-  'Read one document''s body and record the access in the same transaction. '
-  'POST rather than GET because PostgREST runs GET read-only. Identical '
-  'visibility to selecting from syncable_document, which it does as invoker.';
-
 grant execute on function wiki.read_document(uuid, jsonb) to fswiki_user;
+
+-- The same read, for the other kind of client.
+--
+-- wiki.read_document() above goes through syncable_document, and that is not
+-- an implementation detail -- it is the `sync` capability being enforced by the
+-- server rather than by the client's good manners. A document that is readable
+-- but not syncable comes back as no rows, which is exactly what a FUSE mount
+-- or the CLI should get.
+--
+-- A browser is the other case, and it is the case `sync` was invented for.
+-- Denying sync is documented as leaving a page "perfectly readable in the
+-- browser while keeping it off laptops -- every view then costs a request the
+-- server can log". A renderer that read through syncable_document could not
+-- serve those pages at all, so the audit lever would take away the very thing
+-- it exists to produce.
+--
+-- Hence two functions rather than one with a flag. Which view a caller reads
+-- through is a permission decision, and a permission decision that arrives as
+-- an argument is one the caller gets to make. These are two grants instead,
+-- and today both are held by everyone -- but they are separable the day a
+-- deployment wants a renderer that cannot mirror, or a mirror that cannot
+-- render.
+create or replace function wiki.view_document(
+  p_document uuid,
+  p_event    jsonb default null
+)
+returns table (content text)
+language plpgsql volatile
+set search_path = wiki, public, pg_temp as $$
+declare
+  v_user    uuid;
+  v_acted   uuid;
+  v_content text;
+  v_found   boolean;
+begin
+  select d.content into v_content
+    from wiki.current_document d
+   where d.id = p_document;
+  v_found := found;
+
+  -- Identical to read_document's, deliberately: the same trail, the same
+  -- at-least-once event_id, the same rule that a refused read is the more
+  -- interesting half of an access log. Only the view above differs.
+  --
+  -- The identity lookup is guarded by the presence of a token rather than by
+  -- its result, which is not a micro-optimisation. fswiki_anon holds EXECUTE
+  -- on neither authenticated_user_id() nor current_user_id() -- it has no
+  -- business resolving identity -- so reaching them at all would make every
+  -- anonymous page view fail with "permission denied for function". Asking
+  -- whether a request carries a token needs no grant: it is a GUC read.
+  --
+  -- The consequence is that an unauthenticated read writes no audit row, which
+  -- is the same answer read_document gives and for the same reason:
+  -- access_event names the human who caused the read, and for a public page
+  -- there isn't one. See 070_public_test.sql.
+  if p_event is not null
+     and current_setting('transaction_read_only') = 'off'
+     and coalesce(current_setting('request.jwt.claims', true), '') <> '' then
+    v_user  := wiki.authenticated_user_id();
+    v_acted := nullif(wiki.current_user_id(), v_user);
+  end if;
+
+  if v_user is not null then
+    insert into wiki.access_event
+      (event_id, principal_id, acted_as, document_id, path, occurred_at, action,
+       open_flags, process)
+    values (
+      (p_event ->> 'event_id')::uuid,
+      v_user,
+      v_acted,
+      case when v_found then p_document end,
+      (p_event ->> 'path')::ltree,
+      coalesce((p_event ->> 'occurred_at')::timestamptz, now()),
+      coalesce(p_event ->> 'action', 'open'),
+      (p_event ->> 'open_flags')::integer,
+      p_event -> 'process'
+    )
+    on conflict (event_id) do nothing;
+  end if;
+
+  if v_found then
+    return query select v_content;
+  end if;
+  return;
+end;
+$$;
+
+comment on function wiki.view_document(uuid, jsonb) is
+  'Read one document''s body for display and record the access in the same '
+  'transaction. Gated on `read`, through current_document: this is the browser '
+  'read, and it serves pages that read_document deliberately will not.';
+
+-- Restated on the older function, because the two being told apart by name
+-- alone is what let docs/rendering.md point the renderer at the wrong one.
+comment on function wiki.read_document(uuid, jsonb) is
+  'Read one document''s body for mirroring and record the access in the same '
+  'transaction. Gated on `sync`, through syncable_document: a readable but '
+  'un-syncable document returns no rows. POST rather than GET because '
+  'PostgREST runs GET read-only, and a GET cannot write its own audit row.';
+
+grant execute on function wiki.view_document(uuid, jsonb) to fswiki_user;
+-- And to anonymous callers, so the server serves a public page and a private
+-- one by the same code path. No principal argument, nothing to probe with:
+-- what comes back is what current_document shows fswiki_anon, which is what
+-- was granted to `public`.
+grant execute on function wiki.view_document(uuid, jsonb) to fswiki_anon;

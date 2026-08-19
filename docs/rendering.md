@@ -283,7 +283,7 @@ it to have.
 Per request it:
 
 1. takes the caller's token and reads the document **over `POST
-   /rpc/read_document`**;
+   /rpc/view_document`**;
 2. renders, or takes the cached body for that `(document_id, version)`;
 3. walks the neutral links against what this caller may read;
 4. composes the shell — tree, breadcrumbs, affordances.
@@ -293,6 +293,21 @@ Step 1 is worth noticing: that is the audited read from
 the same mechanism and with the same one round trip. A renderer that fetched
 over GET would be a hole in the trail, and the reason the POST read exists is
 that a GET cannot record itself.
+
+It is `view_document` and not `read_document`, and the difference is the whole
+of the `sync` capability. `read_document` reads through `syncable_document`, so
+a page whose `sync` has been denied comes back as no rows — correct for a FUSE
+mount, which is being told it may not take a copy, and enforced by the server
+rather than by the client remembering to. But denying `sync` is supposed to
+leave a page *readable in a browser* while keeping it off laptops, with every
+view costing a request the server can log. A renderer reading through the sync
+view could not serve those pages at all, so the lever would destroy the very
+trail it exists to produce. `view_document` reads through `current_document`
+and is gated on `read`.
+
+Two functions rather than one with a flag, because which view a caller reads
+through is a permission decision, and a permission decision that arrives as an
+argument is one the caller gets to make. They are two grants instead.
 
 ## Deliberately not yet
 

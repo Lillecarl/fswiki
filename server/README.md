@@ -24,7 +24,9 @@ from 16 on, and slugs depend on that.
 | `070_views.sql` | `current_document`, `syncable_document`, `document_as_of()` |
 | `075_changes.sql` | `change_token()`, for cheap "has anything changed" polling |
 | `080_push.sql` | `wiki.push()` and the publish primitives |
-| `900_builtin_roles.sql` | built-in roles and the tree root |
+| `090_audit.sql` | the access trail, and the two audited reads |
+| `100_impersonation.sql` | acting as someone else, and the log that costs |
+| `900_builtin_roles.sql` | built-in roles, the `public` group, and the tree root |
 | `950_lockdown.sql` | revokes the EXECUTE that PostgreSQL grants to PUBLIC |
 
 `950_lockdown.sql` must stay last. PostgreSQL makes every new function
@@ -135,6 +137,33 @@ read a page can still copy the text out by hand.
 `wiki.syncable_document` is the view a client mirrors. It runs the traversal rule
 on `sync` rather than `read`, so a client's tree and a browser's tree differ
 exactly where a deny-sync ACE sits.
+
+The two audited reads follow that split, and it is the reason there are two.
+`wiki.read_document()` reads through `syncable_document` and is what a mount or
+the CLI calls; a deny-sync page comes back as no rows, enforced by the server
+rather than by the client remembering not to ask. `wiki.view_document()` reads
+through `current_document` and is what a browser calls. Without the second one
+the lever would be self-defeating: the pages it exists to keep behind a logged
+request would be the only pages no logged request could serve.
+
+### Anonymous readers
+
+An ACE names a principal, so being readable without an account needs a
+principal meaning "anyone". That is the built-in `public` group, which
+`wiki.effective_principals()` returns for every caller — logged in or not, so a
+page granted to public is public rather than merely logged-out-visible.
+
+It is a group and not an anonymous user account, and that is load-bearing:
+`wiki.current_user_id()` stays NULL without a token, and eight policies in
+`050_rls.sql` are phrased `current_user_id() is not null`. They guard the user
+directory, group membership and the role tables. An anonymous user account
+would have opened all of them at once.
+
+`fswiki_anon` reaches four relations and six functions, and nothing it may
+execute takes a principal as an argument — the long forms of the ACL walk
+answer "what may *they* read", which is an oracle in the hands of someone with
+no account. That is asserted as an allow-list rather than a list of denials, so
+it fails on anything added: see `test/070_public_test.sql`.
 
 ## Versioning
 
