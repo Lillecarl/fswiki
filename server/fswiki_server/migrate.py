@@ -32,6 +32,13 @@ import psycopg
 
 from .config import MIGRATION_LOCK, Config
 
+# Synchronous, and not merely because startup can afford to block. The lock is
+# session-level, so one connection has to stay open across the whole phase --
+# and the phase is strictly sequential, running before there is an event loop
+# to share. psycopg's AsyncConnection is in the same package for the day a
+# request handler needs SQL; see the package docstring for what such a handler
+# is and is not allowed to ask.
+
 log = logging.getLogger(__name__)
 
 

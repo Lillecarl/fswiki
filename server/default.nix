@@ -27,7 +27,10 @@ python3Packages.buildPythonPackage {
     cp -r ${./schema} $out/${python3Packages.python.sitePackages}/fswiki_server/schema
   '';
 
-  pythonImportsCheck = [ "fswiki_server" "fswiki_server.config" "fswiki_server.migrate" ];
+  pythonImportsCheck = [
+    "fswiki_server" "fswiki_server.config" "fswiki_server.migrate"
+    "fswiki_server.postgrest"
+  ];
 
   meta.description = "Read the wiki in a browser";
 }

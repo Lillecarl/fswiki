@@ -63,10 +63,21 @@ class Config:
     postgrest_host: str = "127.0.0.1"
     postgrest_port: int = 3000
     postgrest_jwt_secret: str | None = None
+    # PostgREST connects as fswiki_authenticator, which can do nothing itself
+    # and holds the two nologin roles it switches between. The migration URL
+    # above needs DDL rights and this one must not have them, so they are two
+    # settings. Falling back is a convenience for a checkout, not a default to
+    # deploy: a PostgREST connected as the owner of the tables would bypass
+    # every policy in 050_rls.sql, because owners are not subject to RLS.
+    postgrest_database_url: str | None = None
 
     @property
     def postgrest_url(self) -> str:
         return f"http://{self.postgrest_host}:{self.postgrest_port}"
+
+    @property
+    def postgrest_db_uri(self) -> str:
+        return self.postgrest_database_url or self.database_url
 
     @classmethod
     def from_env(cls, env: dict[str, str] | None = None) -> "Config":
@@ -85,4 +96,5 @@ class Config:
             postgrest_host=e.get("FSWIKI_POSTGREST_HOST", cls.postgrest_host),
             postgrest_port=int(e.get("FSWIKI_POSTGREST_PORT", cls.postgrest_port)),
             postgrest_jwt_secret=e.get("FSWIKI_JWT_SECRET"),
+            postgrest_database_url=e.get("FSWIKI_POSTGREST_DATABASE_URL"),
         )
