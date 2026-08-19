@@ -7,6 +7,10 @@
   core = pkgs.callPackage ./core { };
   cli = pkgs.callPackage ./cli { };
   fuse = pkgs.callPackage ./fuse { };
+  # The browser-facing reader, and the schema it loads on startup. Not a
+  # client: it holds no identity, passes a visitor's token through, and lets
+  # Postgres decide what comes back.
+  server = pkgs.callPackage ./server { };
 
   # Local Postgres + PostgREST under process-compose. Not a component of the
   # product; it is what the components are developed against.

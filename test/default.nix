@@ -15,6 +15,7 @@ let
   fswiki-core = pkgs.callPackage ../core { };
   fswiki-cli = pkgs.callPackage ../cli { };
   fswiki-fuse = pkgs.callPackage ../fuse { };
+  fswiki-server = pkgs.callPackage ../server { };
 
   python = pkgs.python3.withPackages (ps: [
     ps.pytest
@@ -32,6 +33,10 @@ let
     # needs the device.
     ps.pyfuse3
     fswiki-core
+    # The browser-facing server. Unlike the mount and the CLI it is imported
+    # in-process rather than run as a subprocess, so it goes in the test
+    # environment rather than on PATH.
+    fswiki-server
     ps.httpx
     ps.nh3
     ps.markdown-it-py
