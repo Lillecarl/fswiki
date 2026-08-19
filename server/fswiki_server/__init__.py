@@ -26,4 +26,4 @@ asyncpg would be a second driver for one job, and asyncio-only besides, where
 the rest of this project is written against anyio.
 """
 
-__all__ = ["config", "migrate", "postgrest"]
+__all__ = ["app", "config", "migrate", "postgrest"]

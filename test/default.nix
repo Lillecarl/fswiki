@@ -58,6 +58,9 @@ let
       pkgs.postgrest
       fswiki-cli
       fswiki-fuse
+      # fswiki-serve, for the end-to-end test that runs the real program
+      # rather than importing its pieces.
+      fswiki-server
       # getfattr, for the xattrs the mount exposes.
       pkgs.attr
       # fusermount3 is setuid and must come from the system; see fuse/default.nix
