@@ -47,7 +47,7 @@ expensive.
 | sanitising the output (nh3) | 0.59 ms | |
 | one code block through pygments | 1.81 ms | |
 | one maths expression to MathML | 0.32 ms | `latex2mathml`, in-process |
-| **a cache hit** | **0.17 µs** | a dict lookup |
+| **a cache hit** | **2.55 µs** | 1.93 µs to build the key, 0.62 µs to look it up |
 
 Roughly 0.6 ms per kB, against the ~30 ms a content fetch already costs over
 HTTP (measured in [audit-trail.md](audit-trail.md)). A typical page is a couple
@@ -292,6 +292,54 @@ That goes in the cache key beside `(document_id, version)`. Leave it out and
 switching engines — or upgrading one — quietly serves output that the code now
 running would not produce. The `+fswiki<n>` suffix is the pre- and post-passes'
 own version, because they affect the bytes too.
+
+### The cache exists, and it is not the bottleneck
+
+`fswiki_core.render.cache` is a byte-bounded LRU on
+`(document_id, version, renderer)`, held per process and consulted by `Pages`.
+`FSWIKI_RENDER_CACHE_BYTES` sizes it; `0` turns it off.
+
+Two rules make it correct rather than merely fast, and both are asserted in
+`test/test_render_cache.py`:
+
+- **What is stored is the neutral body**, with wiki links still under the
+  reserved prefix. Resolution runs per reader afterwards. Cache the composed
+  page instead and one reader's link graph is served to the next. A test
+  composes one stored body for two readers with different outlines and
+  requires the same bytes to resolve differently.
+- **A draft is never stored.** Its content is mutable and it has no version, so
+  the key does not exist for it. This is structural rather than conditional:
+  there is no published row in the draft branch to build a key from.
+
+Then the measurement, taken end to end against a live stack on this host:
+
+| | median |
+| --- | --- |
+| `client.document()` — one PostgREST round trip | **77.9 ms** |
+| `client.outline()` — the other | **89.5 ms** |
+| rendering a 17 B page | 0.12 ms |
+| rendering the 14.7 kB page | 9.90 ms |
+| a cache hit | 2.55 µs |
+| **a whole page, end to end** | **~168 ms** |
+
+So the cache turns 9.90 ms into 2.55 µs — a factor of about 3,900 on the step
+it covers — and **that step is six per cent of the page**. Two PostgREST round
+trips are 167 ms of the 168. Switching the cache off and on again moves the
+end-to-end number by less than the noise.
+
+That is worth writing down rather than hiding, because it says what to do next:
+**the render was never the problem.** The next real win is the two round trips —
+`outline()` alone costs more than `document()`, and every page pays both. A
+third of a second per page is not a rendering question.
+
+The cache stays regardless. It is correct, it is 60 lines, it costs nothing at
+a hit, and it stops being invisible the moment syntax highlighting lands (#9),
+which adds 8.57 ms per code block to the half of the page it does cover.
+
+One thing the measurement changed: building the key cost 8.38 µs against a
+0.62 µs lookup, because `config_digest` hashed the options dict on every
+request. It is now memoised per backend instance — the lifetime over which the
+answer cannot change — and the key costs 1.93 µs.
 
 ### Conformance, and why it is not optional
 

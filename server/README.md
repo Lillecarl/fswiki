@@ -73,6 +73,7 @@ mount talk to it directly. This program only owns its lifetime.
 | `FSWIKI_HOST`, `FSWIKI_PORT` | this server |
 | `FSWIKI_POSTGREST_HOST`, `FSWIKI_POSTGREST_PORT`, `FSWIKI_POSTGREST_BIN` | that one |
 | `FSWIKI_JWT_SECRET` | passed to PostgREST, which is what verifies tokens |
+| `FSWIKI_RENDER_CACHE_BYTES` | rendered bodies held in this process; `0` turns it off. Nothing in it is ever invalidated — a revision's content cannot change — so this is a memory bound and not a staleness one. Default 32 MiB |
 
 **There is no login yet.** A visitor's token is read from a `fswiki_session`
 cookie or an `Authorization: Bearer` header and passed through; without one
