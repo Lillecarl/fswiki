@@ -1,0 +1,154 @@
+# fswiki
+
+A wiki that is a filesystem, with permissions that are real.
+
+```console
+$ fswiki-mount ~/wiki &            # runs in the foreground; & or another terminal
+$ vim ~/wiki/engineering/onboarding.md
+$ fswiki status
+1 pending change:
+
+   modified  engineering/onboarding  (from revision 2)
+
+Publish with: fswiki push -m "..."
+
+$ fswiki push -m "the laptop bit was wrong"
+Published 1 change.
+
+   published  engineering/onboarding  -> revision 3
+```
+
+Two things follow from that, and between them they are the whole project.
+
+**The wiki is a directory.** Not "exports to markdown", not "has a git backend"
+— a FUSE mount whose files are the documents. `vim` works. `rg` works. So does
+anything else you already have, because there is nothing to integrate with.
+
+**Permissions are enforced by the database, on every read.** An NTFS-style ACL
+over an `ltree` path, evaluated by Postgres row-level security. There is no
+application tier that could forget to check: the mount, the CLI, the renderer
+and `psql` all get the same answer, because they all get it from the same
+`USING` clause.
+
+## What is unusual about it
+
+**A page you may not read is indistinguishable from a page that is not there.**
+Not merely hidden — *identical*. A link to it renders as the same plain text as
+a link to nothing, `push` reports a create collision as `forbidden` rather than
+handing back the occupant's content, and the mount simply does not list it.
+The difference between "forbidden" and "missing" is itself a disclosure, and it
+is the one an ACL was never asked to make. See
+[docs/rendering.md](docs/rendering.md).
+
+**Saving is not publishing.** A write through the mount becomes a *draft* — a
+row that belongs to you, that nobody else sees, and that stays yours until you
+push it. Commit mode, like SVN, because a wiki where every keystroke is live is
+a wiki nobody drafts in. Push does a three-way merge against the revision you
+actually read, so two people editing one page get a conflict rather than a
+silent lost update.
+
+**You can check an ACL by being someone else.**
+
+```console
+$ fswiki-mount --as bob ~/bobs-view
+WARNING fswiki: mounting the view of bob — not yours. Read-only, and the
+server has a record of it
+$ ls ~/bobs-view/engineering/
+onboarding.md  private/
+```
+
+An ACL is a prediction about what a person will be able to see, and `ls` is the
+only honest way to check a prediction. It is read-only three times over — a
+read-only transaction on the server, `ro` in the mount options so the kernel
+refuses writes before they reach us, and `0444` so an editor says no first —
+and the server logs the impersonation as a session before it will serve a byte
+of it. You can also borrow a *membership* rather than a person, which answers
+"what would a new engineer see" without inventing an employee. See
+[docs/impersonation.md](docs/impersonation.md).
+
+**Reads are audited by the request that serves them.** `POST /rpc/read_document`
+returns the document and records the access in the same transaction, so there is
+no window where one happened without the other — and a `GET` could not do it,
+because PostgREST runs `GET` in a read-only transaction. Opens the mount serves
+from its own cache go to a local queue that ships later, so the trail does not
+develop holes that depend on what you read earlier. See
+[docs/audit-trail.md](docs/audit-trail.md).
+
+## The pieces
+
+| | |
+| --- | --- |
+| [`server/`](server/) | The schema. Documents, versions, drafts, the ACL, and the RLS that enforces it. PostgREST in front, no application tier. |
+| [`core/`](core/) | Shared by both clients: the PostgREST client, path naming, the three-way merge, the render pipeline. |
+| [`fuse/`](fuse/) | `fswiki-mount`. The tree, on **trio** — pyfuse3's native backend. |
+| [`cli/`](cli/) | `fswiki`. status, diff, push, revert, merge, render, preview. |
+| [`dev/`](dev/) | Real Postgres and PostgREST under process-compose. Nothing is mocked. |
+| [`test/`](test/) | 258 tests against all of it. See [test/README.md](test/README.md). |
+
+## Running it
+
+```console
+$ nix-build ./dev && ./result/bin/fswiki-dev
+$ eval "$(fswiki-dev env)"
+$ export FSWIKI_TOKEN=$(fswiki-dev token bob)
+
+$ nix build --file . fuse cli
+$ fswiki-mount ~/wiki
+```
+
+The dev stack is Postgres on `127.0.0.1:55432` and PostgREST on `:3000`, loaded
+with fixture users (`alice bob carol dave erin frank grace`) whose ACLs are
+built to have interesting shapes rather than tidy ones. `fswiki-dev token bob`
+signs a JWT with a local secret in exactly the form `wiki.current_user_id()`
+resolves — no OIDC provider needed until there is one.
+
+There is a browser view too, for while you are writing:
+
+```console
+$ fswiki preview
+fswiki preview on http://127.0.0.1:8222/
+  read-only; ctrl-c to stop
+```
+
+It renders your drafts, not the published copy, and reloads itself when
+anything changes.
+
+## Testing
+
+```console
+$ nix build --file . tests.check -L      # 121 tests, ~15s, in a pure build sandbox
+$ nix run --file . tests                 # everything, if you have /dev/fuse
+```
+
+The mount tests need a real `/dev/fuse` and a namespace to mount in;
+[test/README.md](test/README.md) has the `unshare` invocation and explains which
+flag does what. Both halves run in CI.
+
+The suite builds its own Postgres and PostgREST rather than talking to
+`fswiki-dev`, which is somebody's working state.
+
+## Where the thinking is written down
+
+The `docs/` directory is not API reference — it is the arguments, with the
+measurements that settled them.
+
+- [docs/rendering.md](docs/rendering.md) — why this cannot be a static site
+  generator, why the render cache key is immutable, and how a link graph leaks
+  if you are not careful.
+- [docs/impersonation.md](docs/impersonation.md) — why acting as a *group* is
+  not acting as a member of it, and why the refusal keys on function volatility
+  rather than the HTTP verb.
+- [docs/audit-trail.md](docs/audit-trail.md) — what the server knows by itself,
+  and what is only ever a claim by software the user controls.
+- [docs/change-notification.md](docs/change-notification.md) — eleven bytes
+  against six kilobytes, and why a notification bridge must never carry content.
+
+## Status
+
+Working and used, but early. Notably absent, and deliberately so: attachments
+and images (the ACL would have to apply to something that is not a document,
+which is a schema question before it is a rendering one), search, and any
+identity provider beyond "a JWT with a subject the database recognises".
+
+Requires PostgreSQL 16 or newer — `ltree` labels only accept hyphens and
+non-ASCII from 16 on, and slugs depend on that.

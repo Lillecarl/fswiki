@@ -318,3 +318,106 @@ def test_the_reload_poll_stays_quiet_during_an_outage(blinking_preview, spare):
     spare.stop()
     r = get(blinking_preview, "/-/changed")
     assert r.code == 200
+
+
+# ---------------------------------------------------------------------------
+# Someone else's view, in a browser
+#
+# The last impersonation surface. The mount says "not yours" with mode bits and
+# `ro`; the CLI says it by refusing to write. A web page has neither, and it is
+# the surface where the mistake is easiest to make — a page that looks exactly
+# like your own wiki, minus a few things, is indistinguishable from your own
+# wiki having lost a few things.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def borrowed(stack):
+    """A preview of bob's view, run by dave."""
+    import subprocess
+    from conftest import free_port
+
+    stack.exec("""
+        insert into wiki.impersonation_grant (actor_id, subject_id)
+          select (select id from wiki.principal where name = 'dave'), p.id
+            from wiki.principal p where p.name in ('everyone', 'engineering')
+        on conflict do nothing;
+    """)
+    port = free_port()
+    import tempfile
+    from pathlib import Path
+    log = Path(tempfile.mkstemp(prefix="preview-as-", suffix=".log")[1])
+    proc = subprocess.Popen(
+        ["fswiki", "--as", "bob", "preview", "--port", str(port)],
+        stdout=subprocess.DEVNULL, stderr=open(log, "w"), env=stack.env("dave"))
+    base = f"http://127.0.0.1:{port}"
+    try:
+        wait_for(lambda: answers(base + "/"), timeout=30,
+                 what="the borrowed preview to answer")
+        yield base, log
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_every_page_says_whose_view_it_is(borrowed):
+    """On every page, not on a status screen somebody has to think to visit.
+    The whole failure mode of impersonation is forgetting you are doing it."""
+    base, _ = borrowed
+    for route in ("/", "/public/welcome", "/no/such/page"):
+        body = get(base, route).body
+        assert "viewing as bob" in body, route
+        assert "read-only" in body, route
+
+
+def test_it_shows_the_subjects_wiki_and_not_the_actors(borrowed, stack):
+    """dave is an auditor and reads more than bob. A preview that quietly used
+    dave's own permissions would answer the opposite of the question asked."""
+    base, _ = borrowed
+    assert get(base, "/engineering/secret-plans").code == 404
+
+
+def test_writing_methods_are_still_refused(borrowed):
+    """Refused before routing, as for any preview. Worth asserting again here
+    because this is the one configuration where a write would be a forgery in
+    somebody else's name rather than merely a bug."""
+    base, _ = borrowed
+    assert get(base, "/public/welcome", method="POST").code == 405
+
+
+def test_starting_one_says_so_on_the_terminal(borrowed):
+    """Said once, where somebody is looking, in the same words the mount uses."""
+    _, log = borrowed
+    said = wait_for(lambda: log.read_text() if "ctrl-c" in log.read_text() else None,
+                    timeout=30, what="the preview to announce itself")
+    assert "showing the view of bob" in said
+    assert "not yours" in said and "record" in said
+
+
+def test_a_membership_is_described_as_a_membership(stack):
+    """"a member of everyone, engineering" — not "engineering". The two are
+    different questions, and the wording is what keeps them apart on the one
+    surface with room to say it."""
+    import subprocess
+    import tempfile
+    from pathlib import Path
+    from conftest import free_port
+
+    stack.exec("""
+        insert into wiki.impersonation_grant (actor_id, subject_id)
+          select (select id from wiki.principal where name = 'dave'), p.id
+            from wiki.principal p where p.name in ('everyone', 'engineering')
+        on conflict do nothing;
+    """)
+    port = free_port()
+    log = Path(tempfile.mkstemp(prefix="preview-group-", suffix=".log")[1])
+    proc = subprocess.Popen(
+        ["fswiki", "--as-group", "everyone", "--as-group", "engineering",
+         "preview", "--port", str(port)],
+        stdout=subprocess.DEVNULL, stderr=open(log, "w"), env=stack.env("dave"))
+    base = f"http://127.0.0.1:{port}"
+    try:
+        wait_for(lambda: answers(base + "/"), timeout=30, what="the preview")
+        assert "viewing as a member of everyone, engineering" in get(base, "/").body
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
