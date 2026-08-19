@@ -558,15 +558,26 @@ def mount_factory(stack, tmp_path_factory):
         # and no amount of unsharing conjures a device node that is not there.
         # Skipping says that; the alternative is every mount test failing with
         # whatever libfuse says about an open() it could not make.
-        pytest.skip("no /dev/fuse; mount tests need one", allow_module_level=True)
+        pytest.skip("no /dev/fuse; mount tests need one")
     live: list[Mount] = []
 
-    def start(*flags: str, user: str = "bob", poll: float = 1.0) -> Mount:
+    def start(*flags: str, user: str = "bob", poll: float = 0.25,
+              ttl: float = 0.2) -> Mount:
+        # A short kernel TTL, which is a test-harness concern rather than a
+        # sensible default. `--ttl` is how long the kernel is told it may cache
+        # lookups and attributes without asking us, so at the shipped 5 seconds
+        # every "has the mount noticed yet?" costs up to five seconds of stale
+        # cache -- and the merge tests, which are nothing but that question,
+        # took two thirds of the suite's wall clock waiting for it. Serving a
+        # getattr from the tree we already hold is free; only `poll` decides how
+        # often the server is asked anything -- and a poll is eleven bytes, so
+        # four a second costs less than one manifest fetch would.
         base = tmp_path_factory.mktemp("mnt")
         log = base.parent / f"{base.name}.log"
         handle = open(log, "w")
         proc = subprocess.Popen(
-            ["fswiki-mount", str(base), "--poll", str(poll), *flags],
+            ["fswiki-mount", str(base), "--poll", str(poll), "--ttl", str(ttl),
+             *flags],
             stdout=handle, stderr=handle, env=stack.env(user))
 
         def mounted():

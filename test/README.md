@@ -44,9 +44,9 @@ The mount tests are marked, and they are marked precisely so that this works.
 
     nix build --file . tests.check -L
 
-97 tests, about eleven seconds, entirely inside a pure Nix build. That covers
-the render seam, the client, the SQL suite, the audit trail over HTTP and
-impersonation over HTTP.
+121 tests, about fifteen seconds, entirely inside a pure Nix build. That covers
+the render seam, the client, the audit queue, the SQL suite, the audit trail
+over HTTP and impersonation over HTTP.
 
 Two things were measured rather than assumed. **Loopback works**: the sandbox's
 `lo` is up with 127.0.0.1 and binds and connects fine, so Postgres and PostgREST
@@ -82,6 +82,8 @@ it.
 | `test_mount_audit.py` | `fswiki-mount --audit`, including offline spooling |
 | `test_mount_offline.py` | what the mount does when the server goes away |
 | `test_mount_impersonation.py` | `fswiki-mount --as` |
+| `test_cli_impersonation.py` | `fswiki --as`, including that it cannot write |
+| `test_audit_queue.py` | the audit queue as a queue: cap, batching, recovery |
 | `test_preview.py` | `fswiki preview` |
 
 ## How it is put together
@@ -106,6 +108,13 @@ against the same database, with `stop()` and `start()`. Killing the session's
 own would take every later test with it, and "what happens when the server goes
 away" is not answerable any other way — it is also where two of the suite's
 first real bugs were.
+
+**Short kernel TTLs, on purpose.** Mounts start with `--ttl 0.2 --poll 0.25`
+rather than the shipped 5 and 2. `--ttl` is how long the kernel may answer a
+lookup without asking the mount at all, so at 5 seconds every "has it noticed
+yet?" costs up to five seconds of stale cache — the merge tests, which are
+nothing but that question, were two thirds of the suite's wall clock. Serving a
+getattr from the tree we already hold is free, and a poll is eleven bytes.
 
 **Never sleep; wait for the thing.** The mount polls, the audit shipper
 batches, PostgREST loads a schema cache. `wait_for()` polls a predicate and

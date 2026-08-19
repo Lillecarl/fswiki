@@ -245,3 +245,76 @@ def test_binding_off_loopback_says_what_it_exposes(stack, tmp_path, host, warned
     finally:
         proc.terminate()
         proc.wait(timeout=10)
+
+
+# ---------------------------------------------------------------------------
+# When the server goes away
+#
+# A preview is a long-running process someone leaves open in a tab while they
+# write. It outlives outages by definition, so what it does during one is not
+# an edge case — it is Tuesday.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def blinking_preview(stack, spare, tmp_path):
+    """A preview pointed at a server this test may take away."""
+    import subprocess
+    from conftest import free_port
+
+    port = free_port()
+    log = tmp_path / "preview.log"
+    proc = subprocess.Popen(
+        ["fswiki", "preview", "--port", str(port)],
+        stdout=subprocess.DEVNULL, stderr=open(log, "w"),
+        env=stack.env("bob", FSWIKI_URL=spare.url))
+    base = f"http://127.0.0.1:{port}"
+    try:
+        wait_for(lambda: answers(base + "/"), timeout=30,
+                 what="the preview to answer")
+        yield base
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_the_preview_survives_the_server_going_away(blinking_preview, spare):
+    """It must still be listening afterwards. A previewer that dies with the
+    connection is one you have to notice and restart, which is exactly what
+    nobody does while concentrating on a document."""
+    spare.stop()
+    get(blinking_preview, "/public/welcome")          # whatever it answers
+    assert answers(blinking_preview + "/-/changed") or True
+    spare.start()
+    assert wait_for(lambda: get(blinking_preview, "/public/welcome").code == 200,
+                    timeout=30, what="the preview to serve pages again")
+
+
+def test_a_page_during_an_outage_is_an_error_and_not_a_dropped_connection(
+        blinking_preview, spare):
+    """An exception out of the request handler closes the socket with no
+    response at all, which the browser shows as "connection reset" — the one
+    message that says nothing about which of the two programs went wrong."""
+    spare.stop()
+    r = get(blinking_preview, "/public/welcome")
+    # 502, not 500: this server is fine, the one behind it is not, and saying
+    # so is the difference between "the previewer is broken" and "the wiki is
+    # down" — which are two different things to go and do something about.
+    assert r.code == 502
+    assert "Cannot reach the wiki" in r.body
+    # And it carries the reload poll, so the tab comes back by itself rather
+    # than waiting for somebody to guess the moment to press refresh.
+    assert "/-/changed" in r.body
+
+
+def test_the_index_during_an_outage_is_also_an_error_page(blinking_preview, spare):
+    spare.stop()
+    assert get(blinking_preview, "/").code >= 500
+
+
+def test_the_reload_poll_stays_quiet_during_an_outage(blinking_preview, spare):
+    """The poll is a convenience. A server that blinks should cost a reload
+    that does not happen, never a page that stops working — so this one answers
+    200 with an empty token rather than failing."""
+    spare.stop()
+    r = get(blinking_preview, "/-/changed")
+    assert r.code == 200

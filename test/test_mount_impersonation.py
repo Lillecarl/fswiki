@@ -130,21 +130,37 @@ def test_nothing_in_it_is_writable_by_its_mode(as_bob):
     assert not mode & 0o222, oct(mode)
 
 
-def test_no_drafts_appear_in_a_window(as_bob, clean, mount):
-    """The subject's *published* view, not their working copy.
+def test_the_subjects_drafts_are_part_of_their_view(as_bob, clean, mount):
+    """A draft is part of what a person sees when they look at their own wiki.
 
-    A draft is unpublished work in progress; showing someone else's would make
-    impersonation a way to read over a colleague's shoulder, which is a
-    different feature and not one anybody asked for.
+    This used to ride on the read-only flag and deliberately does not any more,
+    because they are different questions: a support case is very often about a
+    file that was never pushed, so hiding drafts would answer the wrong one.
+    See docs/impersonation.md.
     """
     (mount / "engineering/onboarding.md").write_text("bob is mid-thought\n")
     wait_for(lambda: clean.count("select count(*) from wiki.draft") == 1,
              what="bob's draft")
 
-    def unchanged():
-        return "mid-thought" not in (as_bob / "engineering/onboarding.md").read_text()
+    assert wait_for(
+        lambda: "mid-thought" in (as_bob / "engineering/onboarding.md").read_text(),
+        what="the window to show bob's unpushed work")
 
-    assert wait_for(unchanged, what="the window to keep showing published text")
+
+def test_a_membership_has_no_drafts_and_needs_no_special_case(as_engineering,
+                                                              clean, mount):
+    """A hypothetical worker is not anybody, so no draft is theirs. It falls
+    out of `draft.author_id` never matching a synthetic principal rather than
+    from a branch somewhere that has to remember."""
+    (mount / "engineering/onboarding.md").write_text("bob is mid-thought\n")
+    wait_for(lambda: clean.count("select count(*) from wiki.draft") == 1,
+             what="bob's draft")
+
+    def unchanged():
+        body = (as_engineering / "engineering/onboarding.md").read_text()
+        return "mid-thought" not in body
+
+    assert wait_for(unchanged, what="the group window to show published text")
 
 
 def test_a_write_that_gets_past_the_kernel_is_still_refused(as_bob, grants, rest):
