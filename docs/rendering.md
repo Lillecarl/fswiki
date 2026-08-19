@@ -335,13 +335,26 @@ plain names left the colour of the surrounding text. A class with no rule is a
 token nobody notices, so `test_render_highlight.py` fails when a language emits
 one that is neither styled nor deliberately plain.
 
-**tree-sitter is the better engine and is not, as packaged for Python, a
-highlighter.** It parses 6.4× faster than pygments lexes, and
-`tree-sitter-language-pack` ships 248 compiled grammars and not one
-`highlights.scm`. Turning a tree into `<span class="k">` needs a query per
-language and a capture-name mapping, and neither is in the box. So the cheap
-engine went first, behind a hook, and issue #9 holds the measurements for
-swapping it.
+**tree-sitter was measured against it, and lost.** It is the better engine for
+an editor and it is the wrong one here, which took building the whole thing to
+find out: parsers from `tree-sitter-language-pack`, `highlights.scm` from
+`tree-sitter-grammars`, and a capture-name mapping written by hand. All eleven
+grammars sampled compiled their queries, so the packaging was the smaller half
+of the problem.
+
+Three numbers decided it. **A parse costs about 0.18 ms whatever the input**,
+so on this repo's median 158 B block pygments answers in 0.09 ms and
+tree-sitter takes 0.40 ms — parsing alone is already twice the whole pygments
+call. tree-sitter wins 1.4×–3.9× from 1 kB up, which is where a render cache
+means the block is coloured once per revision anyway. And it classifies **6
+kinds of token against pygments' 18** on the same Python: `Cache`, `__init__`,
+`put`, `self`, `int` and `print` all come back as "a name". Closing that gap
+means writing queries per language rather than writing a map, and the grammars
+do not even share a capture vocabulary — sql says `conditional`, diff says
+`diff.plus`, yaml says `property`.
+
+The engine is behind one function, so this stays a swap rather than a rewrite
+if the argument changes. Issue #9 has the full comparison.
 
 ### The renderer is part of the cache key
 
