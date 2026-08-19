@@ -157,8 +157,13 @@ class RstBackend:
         "report_level": 5,
         "halt_level": 5,
         "embed_stylesheet": False,
-        # Avoids a pygments dependency, and pygments emits inline style
-        # attributes that the sanitiser would drop anyway.
+        # Off because pygments is a dependency this backend does not
+        # otherwise need, and for no other reason. Not because the output
+        # would not survive: measured on docutils 0.23 with pygments 2.20,
+        # `short` and `long` emit 13 classes and *zero* inline style
+        # attributes, and all 13 come through `safety.clean()` intact --
+        # `span` and `class` are already allowed. Turning this on is one
+        # setting and no sanitiser change. See issue #9.
         "syntax_highlight": "none",
         # docutils converts `:math:` to MathML itself, so this backend needs
         # no latex2mathml. Named rather than left to the default because the
