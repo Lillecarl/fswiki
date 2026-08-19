@@ -1,3 +1,5 @@
+
+
 -- Close the default that PostgreSQL leaves open. Loads last, on purpose.
 --
 -- PostgreSQL grants EXECUTE on every newly created function to PUBLIC. There is
@@ -27,22 +29,3 @@ revoke execute on all functions in schema wiki from public;
 
 -- Belt and braces for anything added later without thinking about it.
 alter default privileges in schema wiki revoke execute on functions from public;
-
--- RESIDUAL, KNOWN AND ACCEPTED
--- ----------------------------
--- An *authenticated* caller can still pass an explicit p_user to the functions
--- fswiki_user must hold EXECUTE on — wiki.can(), wiki.can_traverse(),
--- wiki.has_capability(), wiki.capabilities_at() — and learn another principal's
--- capabilities on a document whose uuid they know.
---
--- These cannot simply be revoked: RLS policy expressions are evaluated with the
--- querying role's privileges, so removing the grant makes every policy that
--- calls them fail with "permission denied for function" rather than filtering.
--- That was measured, not assumed.
---
--- The disclosure is close to what `ace_select` grants on purpose — anyone who
--- can read a document can read its ACL — and document uuids are not guessable,
--- so this is a small leak rather than an open door. Closing it properly means
--- splitting each function into an internal form and a no-p_user client form,
--- and pointing the views at the latter. Worth doing; not worth doing quietly in
--- the same change as the anon fix.

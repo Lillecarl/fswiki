@@ -57,8 +57,10 @@ def main(argv: list[str] | None = None) -> int:
         except MigrationError as exc:
             print(f"fswiki-serve: {exc}", file=sys.stderr)
             return 1
-        log.info("schema: %s", "already present" if result.already_present
-                 else f"loaded {len(result.loaded)} files")
+        log.info("schema: %s tables, %d runtime files replayed, %d seed",
+                 f"loaded {len(result.tables)}" if result.created
+                 else "kept the existing",
+                 len(result.runtime), len(result.seed))
 
     try:
         postgrest = Postgrest(config)

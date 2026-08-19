@@ -1,13 +1,15 @@
 """The startup phase that puts the schema in the database.
 
-Three phases start this server -- migrate, start PostgREST, serve -- and the
-order is load-bearing rather than tidy: PostgREST builds a schema cache when it
-connects, so starting it against a database that is about to change gets a
-cache of the old shape.
+The schema is in three directories and the split is the design. `tables/` is
+state and loads once. `runtime/` -- functions, views, policies, triggers,
+grants -- is dropped and replayed on every start, because those objects have no
+contents of their own and the file *is* the definition. `seed/` is the handful
+of rows the wiki cannot work without, replayed after runtime because the root
+document's path is computed by a trigger.
 
-What migrate() does today is load the schema if it is absent and nothing if it
-is present. There is no migration chain yet, so there is no path from an old
-schema to a new one. The lock is what makes even that safe to run twice.
+Two properties make that safe, and both are asserted below rather than argued:
+a rebuild produces exactly the schema a fresh load produces, and it does not
+touch a single row.
 """
 
 from __future__ import annotations
@@ -20,7 +22,8 @@ import pytest
 
 from conftest import ROOT
 from fswiki_server.config import MIGRATION_LOCK, Config, ConfigError
-from fswiki_server.migrate import MigrationError, migrate, schema_files
+from fswiki_server.migrate import (TRACKS, MigrationError, migrate,
+                                   schema_files)
 
 SCHEMA = ROOT / "server" / "schema"
 
@@ -29,55 +32,82 @@ def url_for(stack, db: str) -> str:
     return f"postgres://postgres@127.0.0.1:{stack.pg_port}/{db}"
 
 
+def dump(stack, db: str) -> str:
+    """The schema as pg_dump sees it, which is the only opinion that counts.
+
+    PostgreSQL 18 stamps a random \\restrict nonce into every dump; without
+    filtering it, no two dumps of anything are ever equal.
+    """
+    out = subprocess.run(
+        ["pg_dump", "-h", "127.0.0.1", "-p", str(stack.pg_port), "-U", "postgres",
+         "--schema-only", "--no-owner", "--schema=wiki", db],
+        check=True, capture_output=True, text=True).stdout
+    return "\n".join(l for l in out.splitlines()
+                     if l.strip() and not l.startswith(("--", "\\restrict",
+                                                        "\\unrestrict")))
+
+
 @pytest.fixture
 def blank(stack):
-    """A database of its own, dropped afterwards.
-
-    Migrating into the session's own database would prove nothing -- the schema
-    is already there -- and migrating into it if it were not would take every
-    other test with it.
-    """
+    """A database of its own, dropped afterwards."""
     name = "fswiki_migrate_test"
 
-    def psqlrun(*args):
-        subprocess.run([*args, "-h", "127.0.0.1", "-p", str(stack.pg_port),
-                        "-U", "postgres"], check=False, capture_output=True)
+    def drop():
+        subprocess.run(["dropdb", "--if-exists", "-h", "127.0.0.1",
+                        "-p", str(stack.pg_port), "-U", "postgres", name],
+                       check=False, capture_output=True)
 
-    psqlrun("dropdb", "--if-exists", name)
+    drop()
     subprocess.run(["createdb", "-h", "127.0.0.1", "-p", str(stack.pg_port),
                     "-U", "postgres", name], check=True, capture_output=True)
     yield Config(database_url=url_for(stack, name), schema_dir=SCHEMA)
-    psqlrun("dropdb", "--if-exists", name)
+    drop()
 
 
-# --- the files --------------------------------------------------------------
+# --- the three tracks -------------------------------------------------------
 
-def test_the_lockdown_is_loaded_last():
+@pytest.mark.parametrize("track", TRACKS)
+def test_every_track_has_files(track):
+    assert schema_files(SCHEMA, track)
+
+
+def test_the_lockdown_is_the_last_thing_in_the_runtime_track():
     """PostgreSQL makes every new function executable by PUBLIC and offers no
     way to create one that is not, so the revoke has to follow the final
-    create. Sorted order is what enforces that, and the numeric prefixes are
-    why sorted order works."""
-    assert schema_files(SCHEMA)[-1].name == "950_lockdown.sql"
+    create. Sorted order enforces it; the numeric prefixes are why sorting
+    works."""
+    assert schema_files(SCHEMA, "runtime")[-1].name == "950_lockdown.sql"
 
 
-def test_an_empty_directory_is_an_error_not_an_empty_success(tmp_path):
-    with pytest.raises(MigrationError, match="no .sql files"):
-        schema_files(tmp_path)
+def test_a_missing_track_is_an_error_that_names_it(tmp_path):
+    with pytest.raises(MigrationError, match="tables/"):
+        schema_files(tmp_path, "tables")
+
+
+def test_no_table_object_is_defined_in_the_runtime_track():
+    """The split has to stay split. A `create table` that drifts into runtime/
+    would be dropped and recreated on every deploy, which is a way to lose a
+    table's contents on a Tuesday."""
+    for path in schema_files(SCHEMA, "runtime"):
+        body = path.read_text().lower()
+        for forbidden in ("\ncreate table", "\ncreate type", "\ncreate index",
+                          "\ncreate unique index"):
+            assert forbidden not in body, f"{path.name} defines {forbidden.strip()}"
 
 
 # --- loading ----------------------------------------------------------------
 
-def test_a_blank_database_gets_every_file(blank):
+def test_a_blank_database_gets_all_three_tracks(blank):
     result = migrate(blank)
-    assert result.loaded == tuple(p.name for p in schema_files(SCHEMA))
-    assert not result.already_present
+    assert result.created
+    assert result.tables == tuple(p.name for p in schema_files(SCHEMA, "tables"))
+    assert result.runtime == tuple(p.name for p in schema_files(SCHEMA, "runtime"))
+    assert result.seed == tuple(p.name for p in schema_files(SCHEMA, "seed"))
 
 
-def test_and_the_schema_is_actually_usable_afterwards(blank):
+def test_and_the_schema_is_usable_afterwards(blank):
     migrate(blank)
     with psycopg.connect(blank.database_url, autocommit=True) as c:
-        # The public group, the ACL walk and a policy: one object from each of
-        # the three kinds the load has to get right.
         assert c.execute("select count(*) from wiki.principal where name = 'public'"
                          ).fetchone()[0] == 1
         assert c.execute("select count(*) from pg_proc p join pg_namespace n "
@@ -87,20 +117,111 @@ def test_and_the_schema_is_actually_usable_afterwards(blank):
                          ).fetchone()[0] > 20
 
 
-def test_running_it_twice_does_nothing_the_second_time(blank):
-    """Which is the whole reason it is safe to call on every start."""
+def test_the_root_document_gets_its_path_from_the_trigger(blank):
+    """Why seed/ loads after runtime/ and not with the tables. wiki.document's
+    path is computed by document_path_sync; seed the root before that trigger
+    exists and root arrives with a null path and the whole tree is unreachable."""
+    migrate(blank)
+    with psycopg.connect(blank.database_url, autocommit=True) as c:
+        assert c.execute("select path::text from wiki.document where slug = 'root'"
+                         ).fetchone()[0] == "root"
+
+
+# --- rebuilding -------------------------------------------------------------
+
+def test_a_rebuild_produces_exactly_what_a_fresh_load_produces(blank, stack):
+    """The property the whole split rests on. If replaying runtime/ over an
+    existing database differed from loading it into an empty one -- by a
+    function, a policy expression, a trigger or a grant -- then production and
+    the test suite would be running different schemas."""
+    migrate(blank)
+    fresh = dump(stack, "fswiki_migrate_test")
+    migrate(blank)
+    assert dump(stack, "fswiki_migrate_test") == fresh
+
+
+def test_a_rebuild_does_not_touch_a_single_row(blank):
+    """Tables are not in the runtime track, so nothing here should reach them.
+    Asserted with a row that was not seeded, because seed data would be put
+    back by the rebuild and prove nothing."""
+    migrate(blank)
+    with psycopg.connect(blank.database_url, autocommit=True) as c:
+        c.execute("insert into wiki.principal (kind, name) values ('user', 'canary')")
+        before = c.execute("select count(*) from wiki.document").fetchone()[0]
+    migrate(blank)
+    with psycopg.connect(blank.database_url, autocommit=True) as c:
+        assert c.execute("select count(*) from wiki.principal where name = 'canary'"
+                         ).fetchone()[0] == 1
+        assert c.execute("select count(*) from wiki.document").fetchone()[0] == before
+
+
+def test_a_function_no_longer_in_the_files_is_gone_after_a_rebuild(blank):
+    """The reason to drop rather than replace. `create or replace` leaves
+    behind whatever the files no longer mention, so a function deleted in the
+    repository would stay callable in production forever."""
+    migrate(blank)
+    with psycopg.connect(blank.database_url, autocommit=True) as c:
+        c.execute("create function wiki.left_behind() returns int "
+                  "language sql as $$ select 1 $$")
+    migrate(blank)
+    with psycopg.connect(blank.database_url, autocommit=True) as c:
+        assert c.execute(
+            "select count(*) from pg_proc p join pg_namespace n "
+            "on n.oid = p.pronamespace "
+            "where n.nspname = 'wiki' and p.proname = 'left_behind'"
+        ).fetchone()[0] == 0
+
+
+def test_tables_are_not_reloaded_over_a_database_that_has_them(blank):
+    """`create table if not exists` silently ignores a definition that has
+    changed, so re-running the table track would look like it worked and leave
+    the column you added missing. It is skipped, and says so."""
     migrate(blank)
     second = migrate(blank)
-    assert second.already_present and second.loaded == ()
+    assert not second.created and second.tables == ()
+    assert second.runtime and second.seed
+
+
+def test_dropping_the_runtime_half_reaches_no_table_object(blank):
+    """`drop function ... cascade` is what makes the rebuild possible, and it
+    is only safe while nothing outside the runtime half depends on a wiki
+    function. The day someone writes `check (wiki.is_slug(name))` on a table,
+    cascade starts dropping constraints and this fails instead."""
+    migrate(blank)
+    with psycopg.connect(blank.database_url, autocommit=True) as c:
+        rows = c.execute("""
+            select 'index '||i.indexrelid::regclass::text
+              from pg_index i
+              join pg_depend d on d.objid = i.indexrelid
+                               and d.refclassid = 'pg_proc'::regclass
+              join pg_proc p on p.oid = d.refobjid
+              join pg_namespace n on n.oid = p.pronamespace
+             where n.nspname = 'wiki'
+            union all
+            select 'constraint '||c2.conname
+              from pg_constraint c2
+              join pg_depend d on d.objid = c2.oid
+                               and d.refclassid = 'pg_proc'::regclass
+              join pg_proc p on p.oid = d.refobjid
+              join pg_namespace n on n.oid = p.pronamespace
+             where n.nspname = 'wiki'
+            union all
+            select 'default on '||a.adrelid::regclass::text
+              from pg_attrdef a
+              join pg_depend d on d.objid = a.oid
+                               and d.refclassid = 'pg_proc'::regclass
+              join pg_proc p on p.oid = d.refobjid
+              join pg_namespace n on n.oid = p.pronamespace
+             where n.nspname = 'wiki'
+        """).fetchall()
+    assert rows == [], f"cascade would reach: {rows}"
 
 
 # --- the lock ---------------------------------------------------------------
 
 def test_a_second_migration_waits_rather_than_racing(blank):
     """Two servers starting at once would otherwise both find the schema
-    absent and both start loading it. Held here by a connection of our own so
-    the wait is observable; in the real case the other holder is another
-    process doing exactly this."""
+    absent and both start loading it."""
     holder = psycopg.connect(blank.database_url, autocommit=True)
     holder.execute("select pg_advisory_lock(%s)", (MIGRATION_LOCK,))
 
@@ -116,15 +237,12 @@ def test_a_second_migration_waits_rather_than_racing(blank):
     assert not done.wait(timeout=1.5), "migrate ran while the lock was held"
 
     holder.close()
-    assert done.wait(timeout=30), "migrate never finished after the lock was freed"
+    assert done.wait(timeout=60), "migrate never finished after the lock was freed"
     worker.join(timeout=5)
-    assert result["migration"].waited
-    assert result["migration"].loaded
+    assert result["migration"].waited and result["migration"].created
 
 
 def test_the_lock_is_released_when_the_migration_is_done(blank):
-    """A session-level lock, so it goes when the connection does — including
-    when the connection goes because the process died mid-load."""
     migrate(blank)
     with psycopg.connect(blank.database_url, autocommit=True) as c:
         assert c.execute("select pg_try_advisory_lock(%s)",

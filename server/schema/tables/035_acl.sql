@@ -1,3 +1,5 @@
+
+
 -- Access control entries.
 --
 -- Modelled on NTFS DACLs rather than on scoped grants: an ACE is attached to one
@@ -46,6 +48,7 @@ create table wiki.ace (
 );
 
 create index ace_document_idx  on wiki.ace (document_id);
+
 create index ace_principal_idx on wiki.ace (principal_id);
 
 comment on table wiki.ace is

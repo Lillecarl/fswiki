@@ -1,27 +1,5 @@
--- Database roles for PostgREST.
---
---   fswiki_authenticator  -- what PostgREST connects as; can do nothing itself
---   fswiki_anon           -- unauthenticated requests; sees nothing
---   fswiki_user           -- every authenticated wiki user
---
--- All three are NOLOGIN except the authenticator. Note that fswiki_user is a
--- single database role shared by every human: separation comes from RLS reading
--- the JWT, not from one Postgres role per person. That is what keeps the
--- connection pool useful.
-
-do $$
-begin
-  if not exists (select 1 from pg_roles where rolname = 'fswiki_anon') then
-    create role fswiki_anon nologin;
-  end if;
-  if not exists (select 1 from pg_roles where rolname = 'fswiki_user') then
-    create role fswiki_user nologin;
-  end if;
-  if not exists (select 1 from pg_roles where rolname = 'fswiki_authenticator') then
-    create role fswiki_authenticator noinherit login;
-  end if;
-end
-$$;
+-- 060_roles.sql, the runtime half.
+-- The file header, and the reasoning, are in ../tables/060_roles.sql.
 
 grant fswiki_anon, fswiki_user to fswiki_authenticator;
 
@@ -43,8 +21,11 @@ grant select on
   to fswiki_user;
 
 grant insert, update, delete on wiki.draft            to fswiki_user;
+
 grant insert, update, delete on wiki.ace              to fswiki_user;
+
 grant insert, update, delete on wiki.document         to fswiki_user;
+
 grant update (email, display_name, last_seen_at) on wiki.user_account to fswiki_user;
 
 -- Publishing is a normal client privilege gated by normal policies, not a
@@ -54,6 +35,7 @@ grant update (email, display_name, last_seen_at) on wiki.user_account to fswiki_
 -- conflict detection and clobber someone's edit. It cannot rewrite history and
 -- it cannot escape the ACL.
 grant insert          on wiki.document_version to fswiki_user;
+
 grant update (valid)  on wiki.document_version to fswiki_user;
 
 -- RLS policies are checked against the *querying* role, so fswiki_user needs

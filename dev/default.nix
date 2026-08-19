@@ -81,9 +81,13 @@ let
           echo "==> creating database fswiki"
           createdb fswiki
 
-          for f in "$FSWIKI_ROOT"/server/schema/*.sql; do
-            echo "    $(basename "$f")"
-            psql -q -d fswiki -v ON_ERROR_STOP=1 -X -f "$f"
+          # tables, then runtime, then seed. The order is the design; see
+          # server/fswiki_server/migrate.py, which is what does this for real.
+          for track in tables runtime seed; do
+            for f in "$FSWIKI_ROOT"/server/schema/$track/*.sql; do
+              echo "    $track/$(basename "$f")"
+              psql -q -d fswiki -v ON_ERROR_STOP=1 -X -f "$f"
+            done
           done
 
           # Both files are full of `select helper(...)`, whose result rows are

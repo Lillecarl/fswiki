@@ -23,7 +23,7 @@ import subprocess
 
 import pytest
 
-from conftest import ROOT, _load
+from conftest import ROOT, _load, schema_files
 
 SQL_DB = "fswiki_sql"
 
@@ -39,7 +39,7 @@ def sql_results(stack):
     subprocess.run(["createdb", "-h", "127.0.0.1", "-p", str(stack.pg_port),
                     "-U", "postgres", SQL_DB], check=True, capture_output=True)
 
-    for path in sorted((ROOT / "server" / "schema").glob("*.sql")):
+    for path in schema_files():
         _load(stack.pg_port, path, db=SQL_DB)
     for path in sorted((ROOT / "server" / "test").glob("0*.sql")):
         _load(stack.pg_port, path, db=SQL_DB)

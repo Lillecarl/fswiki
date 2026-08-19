@@ -1,3 +1,5 @@
+
+
 -- Principals: the things a grant can be handed to.
 --
 -- Users and groups share one table so that `access_grant.principal_id` is a
@@ -63,32 +65,3 @@ create table wiki.group_member (
 );
 
 create index group_member_member_idx on wiki.group_member (member_id);
-
--- Membership cycles would make the recursive expansion in wiki.effective_principals
--- non-terminating in spirit (UNION saves us, but the result is nonsense), so
--- reject them at write time.
-create or replace function wiki.group_member_reject_cycle()
-returns trigger
-language plpgsql as $$
-begin
-  if exists (
-    with recursive ancestors as (
-      select new.group_id as id
-      union
-      select gm.group_id
-        from wiki.group_member gm
-        join ancestors a on gm.member_id = a.id
-    )
-    select 1 from ancestors where id = new.member_id
-  ) then
-    raise exception 'group membership cycle: % is already an ancestor of %',
-      new.member_id, new.group_id
-      using errcode = 'check_violation';
-  end if;
-  return new;
-end;
-$$;
-
-create trigger group_member_no_cycles
-  before insert or update on wiki.group_member
-  for each row execute function wiki.group_member_reject_cycle();

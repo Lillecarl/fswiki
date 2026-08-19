@@ -1,3 +1,5 @@
+
+
 -- Authorization: who am I, which principals do I count as, what may I do here.
 --
 -- SECURITY NOTE
@@ -545,7 +547,6 @@ set search_path = wiki, public, pg_temp as $$
   order by caps.c;
 $$;
 
-
 -------------------------------------------------------------------------------
 -- The self-only forms
 -------------------------------------------------------------------------------
@@ -634,6 +635,7 @@ $$;
 comment on function wiki.can(ltree, boolean, uuid, wiki.capability) is
   'May the caller do this here? The five-argument form asks about someone else '
   'and is not granted to unauthenticated callers.';
+
 comment on function wiki.capabilities_at(uuid) is
   'Everything the caller may do at a document. The two-argument form asks '
   'about someone else and is not granted to unauthenticated callers.';

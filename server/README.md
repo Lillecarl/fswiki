@@ -24,10 +24,13 @@ from 16 on, and slugs depend on that.
 
 Three phases, in that order, and the order is the program:
 
-1. **migrate** — load the schema if it is absent, holding a session-level
-   advisory lock so that two servers starting at once wait rather than race.
-   There is no migration chain yet: this gets an empty database to the current
-   schema and does nothing to a database that already has one.
+1. **migrate** — load `tables/` if the database is empty, then drop and replay
+   `runtime/` and `seed/` whatever state it was in, all inside one transaction
+   so there is no instant at which the schema is half of one version and half
+   of another. A session-level advisory lock means two servers starting at once
+   wait rather than race. There is no ordered chain for `tables/` yet, so a
+   change to a *table* is not yet deployable to an existing database — a
+   missing feature rather than a silent one. Everything in `runtime/` is.
 2. **start PostgREST** — as a child process, and it does not return until
    PostgREST answers. It is a child because PostgREST builds its schema cache
    on connect and never notices DDL, so whatever changes the schema has to be
@@ -61,7 +64,36 @@ revisions and does not.
 It reads through `current_document`, not `syncable_document`. That is the
 `sync` capability working as documented — see [Sync](#sync) below.
 
-## Load order
+## Three tracks
+
+The schema is split by what kind of thing an object is, because the two kinds
+need opposite treatment.
+
+    schema/tables/    state: tables, columns, types, indexes, RLS enabled
+    schema/runtime/   derived: functions, views, policies, triggers, grants
+    schema/seed/      the handful of rows the wiki cannot work without
+
+**tables/** is state. There is exactly one path from what a table holds today
+to what it should hold tomorrow, so this half wants an ordered, append-only
+chain — and must never be re-run over a database that already has it, because
+`create table if not exists` silently ignores a definition that has changed.
+
+**runtime/** is not state. These objects have no contents of their own and the
+file *is* the definition, so last-write-wins is correct rather than a
+compromise. They are dropped and replayed on every start, which means a change
+to a function is a change to one file with no migration to write — and a
+function deleted from the repository actually disappears, which `create or
+replace` alone would never manage.
+
+**seed/** is replayed too, because every statement in it is idempotent by
+construction. It loads *after* runtime and not with the tables: the root
+document's `path` is computed by the `document_path_sync` trigger, so seeding
+it earlier gives root a null path and makes the whole tree unreachable.
+
+Within each track, files load in name order. `runtime/950_lockdown.sql` must
+stay last: PostgreSQL makes every new function executable by PUBLIC and offers
+no way to create one that is not, so the revoke has to run after the final
+`create function`.
 
 | file | contents |
 | --- | --- |
@@ -71,20 +103,31 @@ It reads through `current_document`, not `syncable_document`. That is the
 | `030_documents.sql` | documents, versions, drafts, path maintenance |
 | `035_acl.sql` | access control entries |
 | `040_authz.sql` | identity, capability closures, the ACL walk, `has_capability()` |
-| `050_rls.sql` | the policies |
-| `060_roles.sql` | database roles for PostgREST |
+| `050_rls.sql` | the policies, and which tables have RLS enabled |
+| `060_roles.sql` | database roles for PostgREST, and every grant |
 | `070_views.sql` | `current_document`, `syncable_document`, `document_as_of()` |
 | `075_changes.sql` | `change_token()`, for cheap "has anything changed" polling |
 | `080_push.sql` | `wiki.push()` and the publish primitives |
 | `090_audit.sql` | the access trail, and the two audited reads |
 | `100_impersonation.sql` | acting as someone else, and the log that costs |
-| `900_builtin_roles.sql` | built-in roles, the `public` group, and the tree root |
+| `900_builtin_roles.sql` | built-in roles, the `public` group, the tree root |
 | `950_lockdown.sql` | revokes the EXECUTE that PostgreSQL grants to PUBLIC |
 
-`950_lockdown.sql` must stay last. PostgreSQL makes every new function
-executable by PUBLIC and offers no way to create one that is not, so the revoke
-has to run after the final `create function` in the load — a revoke in
-`060_roles.sql` would silently miss everything defined after it.
+A concern keeps its name across the tracks it appears in, so
+`tables/030_documents.sql` holds the document tables and
+`runtime/030_documents.sql` holds their triggers.
+
+Two properties make the rebuild safe to run on every start, and both are
+asserted in `test/test_server_migrate.py` rather than argued: replaying
+`runtime/` over an existing database produces *exactly* the schema a fresh load
+produces, byte for byte through `pg_dump`; and it does not touch a single row.
+
+The drop order is policies and triggers, then functions with `cascade`, then
+views — and views last, not first, because two functions in
+`100_impersonation.sql` are declared `returns setof wiki.syncable_document` and
+hold the view up until they are gone. `cascade` is only safe while nothing
+outside the runtime half depends on a wiki function; there is a test that no
+index, constraint or column default does.
 
 ## The permission model
 

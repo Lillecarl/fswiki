@@ -256,7 +256,7 @@ def stack():
         subprocess.run(["createdb", "-h", "127.0.0.1", "-p", str(pg_port),
                         "-U", "postgres", "fswiki"], check=True, capture_output=True)
 
-        for sql in sorted((ROOT / "server" / "schema").glob("*.sql")):
+        for sql in schema_files():
             _load(pg_port, sql)
         # The same fixtures the SQL suite asserts against, so a number measured
         # in one suite means the same thing in the other.
@@ -667,6 +667,19 @@ class Response:
 
     def __contains__(self, needle: str) -> bool:
         return needle in self.body
+
+
+def schema_files() -> list[Path]:
+    """Every schema file, in load order, across the three tracks.
+
+    tables/ is state and loads once; runtime/ is dropped and replayed on every
+    deploy; seed/ follows runtime because the root document's path is computed
+    by a trigger. A fresh database wants all three, in that order. See
+    server/fswiki_server/migrate.py, which is what does this in production.
+    """
+    root = ROOT / "server" / "schema"
+    return [f for track in ("tables", "runtime", "seed")
+            for f in sorted((root / track).glob("*.sql"))]
 
 
 def http(url: str, *, method: str = "GET", token: str | None = None,

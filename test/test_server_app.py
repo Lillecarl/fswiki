@@ -292,7 +292,14 @@ async def test_the_real_program_starts_and_serves(stack, published, tmp_path):
             except OSError:
                 return None
 
-        index = wait_for(answering, what="fswiki-serve to answer")
+        try:
+            index = wait_for(answering, what="fswiki-serve to answer")
+        except AssertionError as exc:
+            # Its own log is the only thing that can say why it never came up,
+            # and a timeout that does not show it is a timeout you debug twice.
+            raise AssertionError(
+                f"{exc}\n--- fswiki-serve log ---\n"
+                f"{(tmp_path / 'serve.log').read_text()}") from exc
         assert index.code == 200, index.body
         assert "notices" in index.body
 
