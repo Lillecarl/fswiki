@@ -28,6 +28,8 @@ expensive thing on a page -- which is what the render cache is for.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 from html import escape
 
 #: The longest block this colours. Longer ones stay plain.
@@ -43,7 +45,72 @@ from html import escape
 #: documentation, whose median block is 158 bytes.
 MAX_LENGTH = 4096
 
+#: The most a single page may colour, across all its blocks.
+#:
+#: MAX_LENGTH bounds one block and bounds nothing about a page, which is the
+#: mistake this exists to fix. Nothing limits how many blocks a document has,
+#: and `document_version.content` is a bare `text` with no size constraint, so
+#: 200 blocks at the block cap is 822 kB of source and **8.7 seconds** of
+#: render -- 99% of it highlighting, against 96 ms for the same page in a
+#: language pygments does not know. One document, written by one user and read
+#: by another. See issue #12.
+#:
+#: Bytes rather than time, and that is the whole design. A deadline was
+#: measured and works -- the longest uninterruptible step is 0.24 ms at the
+#: block cap, and the check costs nothing outside inputs with tens of thousands
+#: of tokens -- but the render cache stores one body per
+#: `(document_id, version, renderer)`, and nothing in that key says how busy
+#: the server was. A page would come back coloured on a quiet server and plain
+#: on a busy one, and whichever ran first is what every later reader gets. A
+#: byte budget depends only on the content and the order of its blocks, so
+#: every machine caches the same bytes.
+#:
+#: 32 kB is about 800 lines of code on one page, against a median block of
+#: 158 B and a largest page of 14.7 kB in this repository's own documentation.
+#: Measured, at 1.3 us/byte for ordinary code and 10 us/byte for the worst
+#: input in issue #9: 43 ms typical, 328 ms worst.
+PAGE_BUDGET = 32768
+
+#: What is left of the current page's budget, or None outside a page.
+#:
+#: A context variable rather than an argument because the budget belongs to the
+#: page and the hooks that spend it are called by somebody else's parser, three
+#: frames down, with no way to pass anything.
+_remaining: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "fswiki_highlight_budget", default=None)
+
 _highlighter: tuple = ()
+
+
+@contextlib.contextmanager
+def page(budget: int | None = None):
+    """Give the enclosing render one page's worth of colouring.
+
+    Outside one of these there is no budget and no accounting: a direct call to
+    `to_html` is a caller asking for one block, not a page being served.
+    `render.render()` opens one for every page it renders.
+    """
+    token = _remaining.set(PAGE_BUDGET if budget is None else budget)
+    try:
+        yield
+    finally:
+        _remaining.reset(token)
+
+
+def _take(n: int) -> bool:
+    """Spend `n` bytes of the page's budget, or refuse. All or nothing.
+
+    All or nothing per block, because half a coloured block is worse than none
+    and because "the first N bytes of this block" is not a thing a lexer can be
+    asked for.
+    """
+    left = _remaining.get()
+    if left is None:
+        return True
+    if n > left:
+        return False
+    _remaining.set(left - n)
+    return True
 
 
 def _load() -> tuple:
@@ -101,6 +168,10 @@ def to_html(code: str, lang: str) -> str:
         # honest answer, and it is the one both engines produce anyway.
         return ""
     except Exception:
+        return ""
+    # Charged after the lexer is known, so a page full of ```notalang spends
+    # nothing: those blocks were never going to be coloured.
+    if not _take(len(code)):
         return ""
     try:
         return colour(code, lexer, formatter)

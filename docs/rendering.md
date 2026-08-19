@@ -302,10 +302,9 @@ and read by another:
 - **The language comes from the fence and from nowhere else.** `guess_lexer`
   took **293 ms** on hostile input to conclude "Text only", and a wrong guess is
   worse than no colour. It is never called.
-- **One block is capped at 4 kB.** Neither pygments nor tree-sitter is
-  interruptible from Python, so a cap is the only bound there is. It bounds the
-  constant rather than the order: everything stayed linear, but the cost per
-  byte varies by an order of magnitude with what the block holds.
+- **One block is capped at 4 kB, and one page at 32 kB.** The cost per byte
+  varies by an order of magnitude with what a block holds, so the cap bounds
+  the constant rather than the order:
 
 | 4 kB of | cost |
 | --- | --- |
@@ -314,6 +313,34 @@ and read by another:
 
 4 kB is eleven times the largest code block in this repository's own
 documentation, whose median block is 158 B.
+
+**The block cap bounds a block and says nothing about a page**, which took a
+second measurement to notice. Nothing limits how many blocks a document has and
+`document_version.content` is a bare `text`, so 200 blocks at the cap is 822 kB
+of source and **8.7 seconds** of render — 99% of it highlighting, against 96 ms
+for the same page in a language pygments does not know. That is an 85×
+amplification from content one user writes and another reads, and the render
+cache does not help: every revision is a new key and so is every new document.
+
+So a page has a budget too, and once it is spent the remaining blocks render
+plain. The same 200-block page now renders in 428 ms, flat in the number of
+blocks.
+
+**Bytes rather than time, and that is the design rather than the easy option.**
+A deadline was measured and it works: the longest uninterruptible step is
+0.24 ms at the block cap — everything expensive is many cheap tokens, and
+everything uninterruptible is one big token and cheap — and a check between
+tokens costs nothing outside inputs with tens of thousands of them. It is still
+wrong here, because the render cache stores one body per
+`(document_id, version, renderer)` and nothing in that key says how busy the
+server was. A page would come back coloured on a quiet server and plain on a
+busy one, and whichever ran first is what every later reader gets. A byte
+budget depends only on the content and the order of its blocks, so every
+machine caches the same bytes. Issue #12 has the measurements.
+
+Both limits go in each backend's `options`, beside the highlighter version, for
+the reason the version is there: they decide what a page comes back holding, so
+the cache key has to move with them.
 
 **Both markdown engines colour the same fence the same way**, byte for byte,
 because `render.highlight.block` writes the wrapper once for both. docutils
@@ -360,7 +387,7 @@ if the argument changes. Issue #9 has the full comparison.
 
 `Rendered.renderer` identifies the whole pipeline, not just the engine:
 
-    markdown-it-py/4.2.0+cfg423e12e8+fswiki4
+    markdown-it-py/4.2.0+cfg91b4fb2e+fswiki4
 
 That goes in the cache key beside `(document_id, version)`. Leave it out and
 switching engines — or upgrading one — quietly serves output that the code now

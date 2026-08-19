@@ -3,7 +3,7 @@
     >>> from fswiki_core import render
     >>> page = render.render("# Hi\n\nsee [[public/welcome]]")
     >>> page.renderer
-    'markdown-it-py/4.2.0+cfg423e12e8+fswiki4'
+    'markdown-it-py/4.2.0+cfg91b4fb2e+fswiki4'
 
 The pipeline is three steps and only the middle one is pluggable:
 
@@ -67,7 +67,11 @@ def render(text: str, *, content_type: str = "text/markdown",
     preferred backend for the content type.
     """
     chosen = get(content_type, backend)
-    html = safety.clean(chosen.to_html(links.expand(text)))
+    # One page, one colouring budget. Without it nothing bounds a document:
+    # the per-block cap says nothing about how many blocks there are, and 200
+    # of them at the cap is 8.7 seconds. See render.highlight.PAGE_BUDGET.
+    with highlight.page():
+        html = safety.clean(chosen.to_html(links.expand(text)))
     return Rendered(
         html=html,
         renderer=_renderer_id(chosen),

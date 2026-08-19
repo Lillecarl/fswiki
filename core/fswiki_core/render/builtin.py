@@ -38,6 +38,19 @@ def _language(info: str | None) -> str:
     return info.strip().split(maxsplit=1)[0] if info and info.strip() else ""
 
 
+def _highlighting() -> dict:
+    """What the highlighter will do, as data, for the renderer id.
+
+    The version alone is not enough. Both limits decide what a page comes back
+    holding -- a block over one is plain, and so is every block after the other
+    runs out -- so a change to either has to move the cache key with it, the
+    same argument that put the version here.
+    """
+    return {"version": highlight.version(),
+            "block_bytes": highlight.MAX_LENGTH,
+            "page_bytes": highlight.PAGE_BUDGET}
+
+
 def _highlight(code: str, lang: str, attrs: str) -> str:
     """The hook markdown-it takes. A return starting with `<pre` is used as
     it stands, which is what lets one function serve both engines."""
@@ -119,7 +132,7 @@ class MarkdownItBackend:
         # them. Both are None when the library is absent, which is a distinct
         # key rather than the same one holding different output.
         self.options = self.options | {"maths": maths.version(),
-                                       "highlight": highlight.version()}
+                                       "highlight": _highlighting()}
 
     def to_html(self, text: str) -> str:
         return self._md.render(text)
@@ -150,7 +163,7 @@ class MistuneBackend:
         self._md.renderer.register("inline_math", _inline_math)
         self._md.renderer.register("block_math", _block_math)
         self.options = self.options | {"maths": maths.version(),
-                                       "highlight": highlight.version()}
+                                       "highlight": _highlighting()}
 
     def to_html(self, text: str) -> str:
         return self._md(text)
@@ -229,7 +242,7 @@ class RstBackend:
 
         self.version = docutils.__version__
         self._publish = publish_parts
-        self.options = self.options | {"highlight": highlight.version()}
+        self.options = self.options | {"highlight": _highlighting()}
 
     def to_html(self, text: str) -> str:
         # `writer=` and not `writer_name=`: the latter is pending removal in

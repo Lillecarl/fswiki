@@ -83,7 +83,7 @@ develop holes that depend on what you read earlier. See
 | [`fuse/`](fuse/) | `fswiki-mount`. The tree, on **trio** — pyfuse3's native backend. |
 | [`cli/`](cli/) | `fswiki`. status, diff, push, revert, merge, render, preview. |
 | [`dev/`](dev/) | Real Postgres and PostgREST under process-compose. Nothing is mocked. |
-| [`test/`](test/) | 791 tests against all of it, at 91% of the lines. See [test/README.md](test/README.md). |
+| [`test/`](test/) | 805 tests against all of it, at 91% of the lines. See [test/README.md](test/README.md). |
 
 ## Running it
 
@@ -165,8 +165,8 @@ anything changes.
 ## Testing
 
 ```console
-$ nix build --file . tests.check -L      # 636 tests, ~45s, in a pure build sandbox
-$ nix run --file . tests                 # all 791, if you have /dev/fuse
+$ nix build --file . tests.check -L      # 650 tests, ~45s, in a pure build sandbox
+$ nix run --file . tests                 # all 805, if you have /dev/fuse
 ```
 
 The mount tests need a real `/dev/fuse` and a namespace to mount in;

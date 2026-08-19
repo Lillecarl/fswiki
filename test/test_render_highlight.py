@@ -272,4 +272,100 @@ def test_the_highlighter_version_is_in_every_backend_id():
     assert colouring, "no backend declares any options"
     for b in colouring:
         assert "highlight" in b.options, b.name
-        assert b.options["highlight"] == highlight.version()
+        assert b.options["highlight"]["version"] == highlight.version()
+
+
+def test_both_limits_are_in_the_id_too():
+    """They decide what a page comes back holding just as much as the version
+    does: a block over one is plain, and so is every block after the other runs
+    out. A key that does not move with them serves one deployment's answer to
+    another."""
+    for b in [b for b in render.available() if b.options]:
+        assert b.options["highlight"]["block_bytes"] == highlight.MAX_LENGTH
+        assert b.options["highlight"]["page_bytes"] == highlight.PAGE_BUDGET
+
+
+# --- the page budget --------------------------------------------------------
+
+def blocks(n: int, size: int, lang: str = "python") -> str:
+    """`n` fenced blocks whose content is `size` bytes each, newline included."""
+    body = "x=1;" * ((size - 1) // 4)
+    body += "#" * (size - 1 - len(body))
+    return "".join(f"```{lang}\n{body}\n```\n\n" for _ in range(n))
+
+
+def coloured_blocks(html: str) -> list[bool]:
+    """Whether each <pre> in the page came back with spans in it."""
+    return ["<span" in pre for pre in html.split("<pre")[1:]]
+
+
+@needs_pygments
+def test_a_page_stops_colouring_when_its_budget_runs_out(backend):
+    """The per-block cap bounds a block and says nothing about a page, and
+    nothing bounds how many blocks a document has. 200 blocks at the cap was
+    822 kB of source and 8.7 seconds of render, 99% of it highlighting. See
+    issue #12."""
+    over = highlight.PAGE_BUDGET // highlight.MAX_LENGTH + 2
+    marks = coloured_blocks(r(blocks(over, highlight.MAX_LENGTH), backend))
+    assert len(marks) == over
+    assert marks[0] is True, "nothing was coloured at all"
+    assert marks[-1] is False, "the budget did not stop anything"
+
+
+@needs_pygments
+def test_the_budget_stops_at_a_block_boundary(backend):
+    """All or nothing per block. Half a coloured block is worse than none, and
+    "the first N bytes of this one" is not something a lexer can be asked."""
+    over = highlight.PAGE_BUDGET // highlight.MAX_LENGTH + 2
+    marks = coloured_blocks(r(blocks(over, highlight.MAX_LENGTH), backend))
+    # Every coloured block comes before every plain one: one switch, no gaps.
+    assert marks == sorted(marks, reverse=True), marks
+
+
+@needs_pygments
+def test_the_same_page_renders_the_same_bytes_every_time(backend):
+    """The reason this is a byte budget and not a deadline. The render cache
+    holds one body per (document_id, version, renderer), and nothing in that
+    key says how busy the server was -- so a rule that consults the clock would
+    cache whichever answer happened to run first."""
+    src = blocks(highlight.PAGE_BUDGET // highlight.MAX_LENGTH + 2,
+                 highlight.MAX_LENGTH)
+    assert r(src, backend) == r(src, backend)
+
+
+@needs_pygments
+def test_every_page_gets_its_own_budget(backend):
+    """It is spent per render, not per process. Otherwise the wiki would stop
+    colouring anything after the first few pages a server ever served."""
+    src = blocks(highlight.PAGE_BUDGET // highlight.MAX_LENGTH + 2,
+                 highlight.MAX_LENGTH)
+    r(src, backend)
+    assert coloured_blocks(r(blocks(1, 64), backend)) == [True]
+
+
+@needs_pygments
+def test_blocks_that_were_never_going_to_be_coloured_cost_nothing(backend):
+    """An unknown language is charged nothing, because it buys nothing. A page
+    of ```notalang must not use up the budget of the one Python block after
+    it."""
+    src = (blocks(highlight.PAGE_BUDGET // highlight.MAX_LENGTH + 2,
+                  highlight.MAX_LENGTH, lang="notalang")
+           + blocks(1, 64))
+    assert coloured_blocks(r(src, backend))[-1] is True
+
+
+@needs_pygments
+def test_a_block_over_the_block_cap_costs_nothing_either(backend):
+    """Same argument: it is refused before it is charged."""
+    src = blocks(2, highlight.MAX_LENGTH + 200) + blocks(1, 64)
+    marks = coloured_blocks(r(src, backend))
+    assert marks[0] is False and marks[-1] is True
+
+
+def test_outside_a_page_there_is_no_budget():
+    """`highlight.to_html` on its own is a caller asking for one block, not a
+    page being served. Only render.render() opens a page."""
+    body = "x=1;" * 2000
+    for _ in range(20):
+        assert highlight.to_html(body[:highlight.MAX_LENGTH], "python") != "" \
+            or not HAS_PYGMENTS

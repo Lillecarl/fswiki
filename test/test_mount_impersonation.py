@@ -227,7 +227,16 @@ def test_the_actor_is_logged_and_the_subject_is_not_accused(as_bob, grants):
 
 def test_a_session_is_one_row_however_many_requests(as_bob, grants):
     """A poll every second would otherwise make the log unreadable within the
-    hour, and an unreadable log is one nobody checks."""
+    hour, and an unreadable log is one nobody checks.
+
+    The first listing is not part of the measurement. A session lasts five
+    minutes and this mount is shared by the whole file, so by the time the test
+    runs its session may legitimately have expired -- and then the next request
+    opens a new one, which is the feature rather than a fault. Counting from
+    after a listing measures "a *live* session does not grow", which is what
+    the sentence above claims. Without it this failed about one run in three,
+    and a flaky test is how the last real bug in this suite stayed hidden."""
+    listing(as_bob)
     before = grants.count("select count(*) from wiki.impersonation_event")
     for _ in range(3):
         listing(as_bob)
