@@ -44,7 +44,7 @@ The mount tests are marked, and they are marked precisely so that this works.
 
     nix build --file . tests.check -L
 
-505 tests, about forty seconds, entirely inside a pure Nix build. That is
+519 tests, about forty seconds, entirely inside a pure Nix build. That is
 every pure unit below, plus the client, the SQL suite, the audit trail over
 HTTP and impersonation over HTTP. Two skip themselves there: the filesystem
 under the build's `$TMPDIR` may not carry user extended attributes, and

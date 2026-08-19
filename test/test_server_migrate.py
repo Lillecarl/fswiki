@@ -282,10 +282,20 @@ def test_the_environment_is_read_whole(stack):
 
 @pytest.fixture
 def copied(blank, tmp_path):
-    """The real schema, somewhere a test may add a file to it."""
+    """The real schema, somewhere a test may add a file to it.
+
+    Made writable explicitly. copytree preserves modes, and under
+    `nix build --file . tests.check` the source is a Nix store path, so the
+    copy comes out read-only and every test below fails with EACCES on a line
+    that has nothing to do with what it is testing.
+    """
     import shutil
+    import stat
     target = tmp_path / "schema"
     shutil.copytree(SCHEMA, target)
+    for path in [target, *target.rglob("*")]:
+        path.chmod(path.stat().st_mode | stat.S_IWUSR | (
+            stat.S_IXUSR if path.is_dir() else 0))
     return Config(database_url=blank.database_url, schema_dir=target)
 
 
