@@ -323,14 +323,29 @@ Then the measurement, taken end to end against a live stack on this host:
 | **a whole page, end to end** | **~168 ms** |
 
 So the cache turns 9.90 ms into 2.55 µs — a factor of about 3,900 on the step
-it covers — and **that step is six per cent of the page**. Two PostgREST round
-trips are 167 ms of the 168. Switching the cache off and on again moves the
-end-to-end number by less than the noise.
+it covers — and **that step is six per cent of the page**. The two reads are
+167 ms of the 168. Switching the cache off and on again moves the end-to-end
+number by less than the noise.
 
-That is worth writing down rather than hiding, because it says what to do next:
-**the render was never the problem.** The next real win is the two round trips —
-`outline()` alone costs more than `document()`, and every page pays both. A
-third of a second per page is not a rendering question.
+The 167 ms is not transport. PostgREST answers a read of a small RLS'd table in
+**1.3 ms**, and the query shape it generates is within the noise of a plain
+`select`. The cost is inside the database, and it is `wiki.can()`:
+
+| | median |
+| --- | --- |
+| `wiki.can()` on 1 document | 4.65 ms |
+| on 5 | 13.27 ms |
+| on 19 | 46.06 ms |
+| `wiki.capabilities_at()` on 19 | 206 ms |
+
+Linear, at about **2.3 ms per document**, and `document_select` calls it once
+per row. Every read of the tree pays it for every document the reader can see.
+That is why `outline()` exists and why `capabilities_at()` is pruned out of it —
+and it is also why the outline still costs 89.5 ms for nineteen documents.
+
+So: **the render was never the problem, and neither is the transport.** The next
+real win is the ACL walk, which is O(documents visible) with a 2.3 ms constant.
+See issue #10.
 
 The cache stays regardless. It is correct, it is 60 lines, it costs nothing at
 a hit, and it stops being invisible the moment syntax highlighting lands (#9),
