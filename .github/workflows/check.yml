@@ -1,0 +1,38 @@
+name: check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  # The sandboxable half of the suite: render, client, SQL, audit and
+  # impersonation over HTTP. 97 tests in about eleven seconds, and it needs
+  # nothing of the runner but a working Nix -- Postgres and PostgREST come up
+  # on loopback inside the build sandbox, which is where they were measured.
+  #
+  # The mount half is deliberately absent. It needs /dev/fuse, which a build
+  # sandbox does not have, so running it here would mean a step outside the
+  # build:
+  #
+  #     unshare --user --map-auto --map-root-user --mount --propagation private \
+  #       $(nix build --file . tests --no-link --print-out-paths)/bin/fswiki-test
+  #
+  # That wants /dev/fuse on the runner, unprivileged user namespaces enabled,
+  # and a /etc/subuid range for --map-auto. GitHub's ubuntu images plausibly
+  # have all three; none of it has been tried on one, so it is written down
+  # here rather than switched on and hoped for.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          # default.nix is `import <nixpkgs> {}`, so NIX_PATH is what pins it.
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - run: nix build --file . tests.check -L
+
+      # Each client is a package in its own right, and a suite that passes
+      # while `nix build` is broken is a suite nobody can install.
+      - run: nix build --file . core cli fuse -L

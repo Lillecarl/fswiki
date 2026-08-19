@@ -48,6 +48,14 @@ let
     ];
 
     text = ''
+      # The mount's own library, from the package that is actually installed
+      # rather than from the source tree beside it. `fswiki_fuse.audit` is
+      # ordinary Python -- a queue, a cap and some arithmetic -- and it can be
+      # tested without a filesystem, in a build sandbox, at unit-test speed. It
+      # imports anyio and fswiki_core and nothing that needs /dev/fuse, which is
+      # why PYTHONPATH is enough and pyfuse3 is not in the environment above.
+      export PYTHONPATH=${fswiki-fuse}/${pkgs.python3.sitePackages}''${PYTHONPATH:+:$PYTHONPATH}
+
       root=''${FSWIKI_ROOT:-$PWD}
       while [ ! -d "$root/server/sql" ] && [ "$root" != / ]; do
         root=$(dirname "$root")
