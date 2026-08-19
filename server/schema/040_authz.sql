@@ -124,6 +124,20 @@ $$;
 -- upward by the ordinary rule. Nested groups, deny ACEs and role inheritance
 -- all behave exactly as they do for a person, because from here down nothing
 -- can tell the difference.
+--
+-- The third seed row is `public`, and it is the only one that does not depend
+-- on p_user at all: everybody is in it, logged in or not. That is what makes a
+-- page readable without an account -- an unauthenticated caller resolves to
+-- {public} and nothing else, so it sees exactly what has been granted to
+-- public and not one row more. Adding it unconditionally rather than only for
+-- a NULL caller is deliberate: a page granted to public is public, and hiding
+-- it from signed-in readers would be a surprising way to define the word.
+--
+-- Note what it does *not* do. current_user_id() stays NULL for an
+-- unauthenticated request, so every policy phrased as `current_user_id() is
+-- not null` -- the ones guarding principal, user_account, group_member and the
+-- role tables -- stays shut. An anonymous *user account* would have opened all
+-- of them at once, which is why this is a group with nobody in it.
 create or replace function wiki.effective_principals(p_user uuid default wiki.current_user_id())
 returns table (principal_id uuid)
 language sql stable security definer parallel safe
@@ -135,6 +149,10 @@ set search_path = wiki, public, pg_temp as $$
     select g as id
       from unnest(coalesce(wiki.act_as_groups(), '{}'::uuid[])) g
      where p_user = wiki.synthetic_principal_id(wiki.act_as_groups())
+    union
+    select p.id
+      from wiki.principal p
+     where p.kind = 'group' and p.name = 'public'
     union
     select gm.group_id
       from wiki.group_member gm
@@ -334,7 +352,13 @@ returns boolean
 language sql stable security definer parallel safe
 set search_path = wiki, public, pg_temp as $$
   select case
-    when p_user is null or p_path is null then false
+    -- No guard on a NULL p_user. It used to be here and it used to be right:
+    -- before `public`, a caller with no account resolved to no principals, so
+    -- refusing early saved an ACL walk that could only ever answer no. It now
+    -- resolves to {public}, and refusing early would refuse exactly the pages
+    -- that were granted out on purpose. The closed world is not what that line
+    -- was protecting -- the coalesce below is: no matching ACE, no access.
+    when p_path is null then false
     when wiki.is_superuser(p_user) then true
     -- The owner's standing right to repair the ACL, and nothing more.
     when p_cap = 'grant'
@@ -390,7 +414,8 @@ returns boolean
 language sql stable security definer parallel safe
 set search_path = wiki, public, pg_temp as $$
   select case
-    when p_user is null then false
+    -- As in wiki.can(): a NULL caller is `public`, not nobody. The exists()
+    -- below is what keeps the world closed.
     when wiki.is_superuser(p_user) then true
     else exists (
       select 1

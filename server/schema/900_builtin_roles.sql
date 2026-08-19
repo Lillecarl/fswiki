@@ -56,6 +56,21 @@ select child.id, parent.id
   join wiki.role parent on parent.name = e.parent_name
 on conflict do nothing;
 
+-- The built-in group everybody is in.
+--
+-- A group with no members and no way to gain any: wiki.effective_principals()
+-- returns it for every caller, which is the whole mechanism. Granting a role
+-- on a document to `public` is how a page becomes readable without an account,
+-- and a deny ACE naming it is how one stops being.
+--
+-- It is a group and not a user on purpose. A principal of kind 'user' would
+-- make wiki.current_user_id() non-NULL for anonymous requests, and eight
+-- policies in 050_rls.sql admit any caller for whom that is true -- the user
+-- directory, group membership and the role tables among them. Nobody is a
+-- member of `public`, so there is nothing for a membership check to leak.
+insert into wiki.principal (kind, name) values ('group', 'public')
+on conflict (kind, name) do nothing;
+
 -- The root of the tree. Everything else hangs off this; a wiki-wide grant is
 -- simply scope = 'root'.
 insert into wiki.document (id, parent_id, slug, is_folder, title)
