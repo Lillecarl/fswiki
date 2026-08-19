@@ -295,6 +295,26 @@ def test_renaming_a_page_that_was_never_published_rewrites_it_in_place(
     assert (mount / "engineering/notes-renamed.md").read_text() == "# Notes\n"
 
 
+def test_a_renamed_draft_is_readable_immediately(mount):
+    """The same rename, read back with nothing in between.
+
+    The test above waits on the database first, and that wait is what used to
+    make it pass: the kernel's attribute TTL expired while it polled, so the
+    read went through a fresh lookup and never noticed that the inode was
+    stale. Reading straight away is the assertion that actually pins the rekey
+    -- after a rename the kernel keeps the *source* inode and files it under
+    the new name, so that inode has to start resolving to the new draft.
+
+    It surfaced when the ACL stopped costing ~90 ms per manifest fetch. A
+    latent bug that only a slow server was hiding is worth a test that does not
+    depend on how fast the server is.
+    """
+    original = mount / "engineering/immediate.md"
+    original.write_text("# Immediate\n")
+    original.rename(mount / "engineering/immediate-renamed.md")
+    assert (mount / "engineering/immediate-renamed.md").read_text() == "# Immediate\n"
+
+
 def test_truncating_a_file_shortens_it(mount, clean):
     """`> file` in a shell, and what several editors do before writing. It
     arrives as a setattr carrying a size and no data at all, so a mount that

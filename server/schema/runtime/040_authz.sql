@@ -759,17 +759,58 @@ set search_path = wiki, public, pg_temp as $$
     -- below is what keeps the world closed.
     when wiki.is_superuser(p_user) then true
     else exists (
-      -- The context is built once for the whole scan rather than once per
-      -- descendant, which is the same trick document_select plays and for the
-      -- same reason. It stays inside this function: nothing here is granted to
-      -- a client, so there is no forged context to worry about and no ACL to
-      -- hand back. Descendants cost 14 us each instead of 445 us.
+      -- Driven from the caller's own allow ACEs rather than from the folder.
+      --
+      -- The naive form scans the subtree and asks about every descendant,
+      -- which makes the cost of a folder the caller may *not* read scale with
+      -- the whole tree under it rather than with anything they can see. On
+      -- 3,720 documents of which one reader could see 122, that was 196 ms.
+      --
+      -- It is avoidable because a document is never allowed by accident: for
+      -- an ACE to apply to it, the ACE sits on one of its ancestors. So only
+      -- descendants that are *also* under one of the caller's allow ACEs can
+      -- come back true, and the join asks GiST for that intersection instead
+      -- of for the subtree. A folder unrelated to every grant the caller holds
+      -- costs an index probe that finds nothing.
+      --
+      -- The flags are not tested here on purpose. Whether an ACE reaches a
+      -- given document is wiki.can_ctx()'s decision and stays there; this
+      -- narrows the candidates and decides nothing.
+      --
+      -- The context is built once for the whole scan, and it stays inside this
+      -- function: nothing here is granted to a client, so there is no forged
+      -- context to worry about and no ACL to hand back.
       select 1
-        from wiki.document child
-       where child.path <@ p_path
+        from wiki.ace a
+        join wiki.document src on src.id = a.document_id
+        join wiki.document child
+          on child.path <@ p_path
          and child.path <> p_path
+         and child.path <@ src.path
+       where a.ace_type = 'allow'
+         and a.principal_id in (select ep.principal_id
+                                  from wiki.effective_principals(p_user) ep)
+         and (a.expires_at is null or a.expires_at > now())
+         and wiki.ace_covers(a.role_id, p_cap, 'allow')
          and wiki.can_ctx(child.path, child.is_folder, child.owner_id, p_cap,
                           (select wiki.acl_context(p_cap, p_user)))
+
+      union all
+
+      -- The one document an ACE does not have to reach: its owner keeps
+      -- `grant` whatever the ACL says, so an owned document is traversable to
+      -- with no allow ACE anywhere above it. That is the whole point of the
+      -- rule -- it is the escape from a deny that locked everybody out --
+      -- and leaving it out of the candidates above cost six disagreements in
+      -- 090_context_test.sql, which is why the equivalence test compares every
+      -- capability rather than the one the policies happen to ask.
+      select 1
+        from wiki.document child
+       where p_cap = 'grant'
+         and child.path <@ p_path
+         and child.path <> p_path
+         and child.owner_id in (select ep.principal_id
+                                  from wiki.effective_principals(p_user) ep)
     )
   end;
 $$;

@@ -468,6 +468,26 @@ already had in hand. Over HTTP, same stack, the 19 fixture documents:
 | the manifest, with capabilities | 410 ms | 91.2 ms | **9.1 ms** |
 | the syncable tree | — | 11.4 ms | **8.4 ms** |
 
+**Traversal was the other half.** A folder is visible when it holds something
+the caller may read, and the old rule scanned the subtree asking about every
+descendant — so a folder the caller may *not* read cost the whole tree under
+it. On 3,720 documents of which one reader could see 122, that was 196 ms.
+
+It is avoidable because a document is never allowed by accident: for an ACE to
+apply to it, the ACE sits on one of its ancestors. So only descendants that are
+also under one of the caller's own allow ACEs can come back true, and the scan
+is driven from those ACEs — GiST is asked for the intersection rather than for
+the subtree. The same case is now 82 ms, and the per-folder cost stopped
+growing with what is under the folder: holding the folder count fixed and
+quadrupling each subtree, 133 documents and 493 documents both cost 25 ms.
+
+One case does not fit that argument and had to be added back. A document's
+owner keeps `grant` whatever the ACL says — that is the escape from a deny that
+locked everybody out — so an owned document is reachable with no allow ACE
+above it anywhere. Leaving it out cost six disagreements in
+`090_context_test.sql`, which is the reason that file compares every capability
+rather than the two the policies happen to ask about.
+
 `wiki.document_version` is the one left at the old cost, and deliberately. A
 version row names its document by id, so a context-taking function would have
 to resolve that id — and a caller can invent a context, which turns an id

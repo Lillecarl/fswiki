@@ -997,6 +997,19 @@ class FswikiFs(pyfuse3.Operations):
             data = (source.draft or {}).get("content") or ""
             await self._create_draft(target_path, content_type, data.encode("utf-8"))
             await self._drop_draft(source.path)
+            # And the same rekey the scratch branch does above, for the same
+            # reason: the kernel keeps the *source* inode and files it under the
+            # new name rather than looking the new name up. Without this the
+            # inode still points at `draft:<old path>`, which no longer
+            # resolves, and the file the caller just renamed reads back ENOENT.
+            #
+            # It hid behind the clock. Every read after a rename went through a
+            # fresh lookup because the kernel's attribute TTL had expired while
+            # the manifest was being fetched; once that fetch stopped costing
+            # ~90 ms, the read landed inside the TTL and the stale inode was
+            # used. So this was a latent bug that a faster ACL turned into a
+            # deterministic one.
+            self._inodes.rekey(source.key, f"draft:{target_path}")
             return
 
         if not source.published:
