@@ -96,6 +96,7 @@ Then against a live stack:
 | `test_sql.py` | the in-database suite, in a database of its own |
 | `test_audit.py` | the access trail over HTTP |
 | `test_impersonation.py` | `--as` / `--as-group` over HTTP |
+| `test_public.py` | what a request with no token at all can reach |
 | `test_cli.py` | `fswiki` — status, diff, push, revert, render |
 | `test_cli_impersonation.py` | `fswiki --as`, including that it cannot write |
 | `test_preview.py` | `fswiki preview` |

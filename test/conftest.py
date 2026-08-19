@@ -708,9 +708,17 @@ def answers(url: str) -> bool:
 
 @pytest.fixture
 def rest(stack):
-    """PostgREST, as a named user, without a client library in the way."""
-    def call(path: str, *, user: str = "bob", method: str = "GET",
+    """PostgREST, as a named user, without a client library in the way.
+
+    `user=None` sends no Authorization header at all, which is the only way to
+    exercise what PostgREST does with an unauthenticated request: it switches
+    to db-anon-role and fswiki_anon's grants decide the rest. Dropping to that
+    role in psql tests the grants but not PostgREST's half of the arrangement,
+    and the two have to agree.
+    """
+    def call(path: str, *, user: str | None = "bob", method: str = "GET",
              body=None, headers: dict | None = None) -> Response:
-        return http(stack.url + path, method=method, token=stack.token(user),
+        return http(stack.url + path, method=method,
+                    token=stack.token(user) if user else None,
                     body=body, headers=headers)
     return call
