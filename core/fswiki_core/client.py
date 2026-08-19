@@ -31,6 +31,18 @@ DRAFT_COLUMNS = (
 )
 
 
+# What "cannot reach it" looks like: connection refused, DNS failure, TLS
+# failure, a timeout. Re-exported rather than wrapped, because wrapping would
+# mean a try/except around every call in this module to gain nothing — but
+# callers should not have to import httpx to catch the one case every one of
+# them has to handle.
+#
+# Deliberately not an OSError: httpx does not derive from it, so catching
+# OSError alone lets a refused connection out as a traceback. That is what it
+# did, until a test asked what `fswiki whoami` says when the server is down.
+Unreachable = httpx.TransportError
+
+
 class PostgrestError(RuntimeError):
     """A non-2xx response, with the body PostgREST put in it."""
 

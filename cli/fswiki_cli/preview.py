@@ -34,7 +34,7 @@ import anyio
 import anyio.from_thread
 
 from fswiki_core import render
-from fswiki_core.client import Client, PostgrestError
+from fswiki_core.client import Client, PostgrestError, Unreachable
 
 from . import paths
 
@@ -119,7 +119,10 @@ class Preview:
         """The change token, for the reload poll. Eleven bytes."""
         try:
             return await self._client.change_token() or ""
-        except PostgrestError:
+        except (PostgrestError, Unreachable):
+            # The poll is a convenience; a server that blinks should cost a
+            # reload that does not happen, never a preview that stops serving
+            # pages it has already rendered.
             return ""
 
 

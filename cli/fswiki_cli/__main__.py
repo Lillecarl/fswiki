@@ -21,7 +21,7 @@ import sys
 import anyio
 
 from fswiki_core import merge, render
-from fswiki_core.client import Client, PostgrestError
+from fswiki_core.client import Client, PostgrestError, Unreachable
 
 from . import paths, preview, report
 
@@ -133,7 +133,7 @@ async def run(args: argparse.Namespace) -> int:
     try:
         try:
             principal = await client.whoami()
-        except (PostgrestError, OSError) as exc:
+        except (PostgrestError, Unreachable, OSError) as exc:
             print(f"fswiki: cannot reach {args.url}: {exc}", file=sys.stderr)
             return 1
 

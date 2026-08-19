@@ -19,7 +19,7 @@ import anyio
 import pyfuse3
 import trio
 
-from fswiki_core.client import Client, PostgrestError
+from fswiki_core.client import Client, PostgrestError, Unreachable
 from .audit import AuditLog
 from .fs import FswikiFs
 
@@ -102,6 +102,15 @@ async def run(args: argparse.Namespace) -> int:
     if args.act_as and args.act_as_groups:
         log.error("--as and --as-group are different questions; pick one")
         return 1
+    if args.audit and not args.token:
+        # Before the network, because this one is decidable from the arguments
+        # alone: events are filed against a principal and anonymous is not one.
+        # Left to the `principal is None` check further down it would arrive as
+        # whatever the server says about an unauthenticated call, which sends
+        # the reader to look at the connection instead of at the flag.
+        log.error("--audit needs a token: events are filed against a "
+                  "principal, and anonymous is not one")
+        return 1
     acting_as = (args.act_as if args.act_as else
                  "a member of " + ", ".join(args.act_as_groups)
                  if args.act_as_groups else None)
@@ -122,7 +131,7 @@ async def run(args: argparse.Namespace) -> int:
                 return 1
             log.error("cannot reach %s: %s", args.url, exc)
             return 1
-        except OSError as exc:
+        except (Unreachable, OSError) as exc:
             log.error("cannot reach %s: %s", args.url, exc)
             return 1
 
