@@ -212,7 +212,7 @@ own version, because they affect the bytes too.
 ### Conformance, and why it is not optional
 
 A plugin seam is a promise about behaviour, and a promise nobody checks is a
-comment. `core/test/conformance.py` runs the same cases against **every
+comment. `test/test_render.py` runs the same cases against **every
 registered backend**: raw HTML never survives, no `javascript:` href survives,
 a wikilink becomes an anchor under the reserved prefix, a forbidden link is
 byte-identical to a missing one, and the renderer id names the engine.
