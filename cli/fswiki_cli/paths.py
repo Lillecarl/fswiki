@@ -49,7 +49,7 @@ def from_filesystem(value: str) -> str:
     if parts and parts[0] == "root":
         parts = parts[1:]
     if not parts:
-        return naming.ROOT_LABEL if hasattr(naming, "ROOT_LABEL") else "root"
+        return "root"
 
     labels = []
     for index, part in enumerate(parts):
