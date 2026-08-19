@@ -8,11 +8,15 @@ cache of the old shape and 404s on everything new.
 The schema is in three directories, and the split is the whole design.
 
 **tables/** is state. Tables, columns, types, indexes, and which tables have
-RLS enabled. There is exactly one path from what a table holds today to what
-it should hold tomorrow, so this is the half that needs an ordered, append-only
-chain -- and the half that must never be re-run over a database that already
-has it, because `create table if not exists` silently ignores a definition that
-has changed since.
+RLS enabled. There is exactly one path from what a table holds today to what it
+should hold tomorrow, so this half is an ordered, append-only chain: each file
+runs exactly once, in name order, recorded in wiki.schema_migration in the same
+transaction that runs it. Changing a table means adding a file, never editing
+one -- an edited file has already run everywhere it was going to run.
+
+It is emphatically not re-run as desired state. `create table if not exists`
+silently ignores a definition that has changed since, which looks like it
+worked and leaves the column you added missing.
 
 **runtime/** is not state. 54 functions, 2 views, 24 policies, 18 triggers and
 every grant: objects with no contents of their own, whose definition is the
@@ -49,6 +53,21 @@ from .config import MIGRATION_LOCK, Config
 log = logging.getLogger(__name__)
 
 TRACKS = ("tables", "runtime", "seed")
+
+# The ledger. Created by this module rather than by a file in tables/, because
+# it has to exist before the first of them can be recorded as having run.
+#
+# It lives in `wiki` and is granted to nobody: 060_roles.sql grants tables one
+# by one and this is not among them, so it is invisible over the API. That is
+# checked by the allow-list in server/test/070_public_test.sql, which asserts
+# the exact set of relations an unauthenticated caller may select.
+LEDGER = """
+create schema if not exists wiki;
+create table if not exists wiki.schema_migration (
+  filename    text primary key,
+  applied_at  timestamptz not null default now()
+);
+"""
 
 # Order matters and is the reverse of the dependency order.
 #
@@ -115,11 +134,12 @@ class Migration:
     runtime: tuple[str, ...]
     seed: tuple[str, ...]
     waited: bool
+    baselined: tuple[str, ...] = ()
 
     @property
     def created(self) -> bool:
         """Whether this was an empty database a moment ago."""
-        return bool(self.tables)
+        return bool(self.tables) and not self.baselined
 
 
 def schema_files(schema_dir: Path, track: str) -> list[Path]:
@@ -175,22 +195,43 @@ def migrate(config: Config) -> Migration:
             conn.execute("select pg_advisory_lock(%s)", (MIGRATION_LOCK,))
         conn.commit()
 
-        present = conn.execute(
-            "select exists (select 1 from pg_namespace where nspname = 'wiki')"
-        ).fetchone()[0]
+        conn.execute(LEDGER)
+        applied = {row[0] for row in conn.execute(
+            "select filename from wiki.schema_migration").fetchall()}
 
-        loaded_tables: list[str] = []
-        if not present:
-            log.info("empty database: loading %d table files", len(tracks["tables"]))
+        # A database that predates the ledger: it has the tables but no record
+        # of how it got them. The only sane reading is that it matches the
+        # files as they stand, so they are recorded without being run.
+        #
+        # Loud, because it is a guess. It is right for every database that
+        # exists as this lands, and it would be wrong for one that had drifted
+        # -- and the drift would then be invisible, which is the failure worth
+        # warning about.
+        baselined: list[str] = []
+        if not applied and _has_schema(conn):
+            log.warning("this database predates the migration ledger; recording "
+                        "%d table files as already applied without running them",
+                        len(tracks["tables"]))
             for path in tracks["tables"]:
-                _run(conn, path)
-                loaded_tables.append(path.name)
-        else:
-            # Where the ordered chain will go. Until it exists, an existing
-            # database keeps the tables it has, and a change to them is not
-            # deployable -- which is a missing feature rather than a silent
-            # one, and better said here than discovered later.
-            log.info("tables already present; leaving them alone")
+                conn.execute("insert into wiki.schema_migration (filename) values (%s)",
+                             (path.name,))
+                baselined.append(path.name)
+            applied = set(baselined)
+
+        # The chain. Every file in tables/ runs exactly once, in name order,
+        # and is recorded in the same transaction that runs it -- so a failure
+        # halfway leaves neither the change nor the claim that it happened.
+        loaded_tables: list[str] = []
+        for path in tracks["tables"]:
+            if path.name in applied:
+                continue
+            log.info("applying tables/%s", path.name)
+            _run(conn, path)
+            conn.execute("insert into wiki.schema_migration (filename) values (%s)",
+                         (path.name,))
+            loaded_tables.append(path.name)
+        if not loaded_tables and not baselined:
+            log.info("no new table migrations")
 
         log.info("rebuilding the runtime half")
         conn.execute(DROP_RUNTIME)
@@ -209,4 +250,15 @@ def migrate(config: Config) -> Migration:
         runtime=tuple(p.name for p in tracks["runtime"]),
         seed=tuple(p.name for p in tracks["seed"]),
         waited=waited,
+        baselined=tuple(baselined),
     )
+
+
+def _has_schema(conn: psycopg.Connection) -> bool:
+    """Whether this database already holds the wiki, ledger aside.
+
+    Keyed on a table rather than on the schema, because LEDGER has just created
+    the schema and would answer yes for an empty database.
+    """
+    return conn.execute(
+        "select to_regclass('wiki.document') is not null").fetchone()[0]

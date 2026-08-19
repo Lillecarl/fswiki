@@ -24,13 +24,11 @@ from 16 on, and slugs depend on that.
 
 Three phases, in that order, and the order is the program:
 
-1. **migrate** — load `tables/` if the database is empty, then drop and replay
+1. **migrate** — apply any unrun `tables/` migrations, then drop and replay
    `runtime/` and `seed/` whatever state it was in, all inside one transaction
    so there is no instant at which the schema is half of one version and half
    of another. A session-level advisory lock means two servers starting at once
-   wait rather than race. There is no ordered chain for `tables/` yet, so a
-   change to a *table* is not yet deployable to an existing database — a
-   missing feature rather than a silent one. Everything in `runtime/` is.
+   wait rather than race.
 2. **start PostgREST** — as a child process, and it does not return until
    PostgREST answers. It is a child because PostgREST builds its schema cache
    on connect and never notices DDL, so whatever changes the schema has to be
@@ -73,10 +71,20 @@ need opposite treatment.
     schema/runtime/   derived: functions, views, policies, triggers, grants
     schema/seed/      the handful of rows the wiki cannot work without
 
-**tables/** is state. There is exactly one path from what a table holds today
-to what it should hold tomorrow, so this half wants an ordered, append-only
-chain — and must never be re-run over a database that already has it, because
-`create table if not exists` silently ignores a definition that has changed.
+**tables/** is state, and an ordered append-only chain. Each file runs exactly
+once, in name order, recorded in `wiki.schema_migration` in the same
+transaction that runs it — so a migration that fails leaves neither the change
+nor the claim that it happened. **Changing a table means adding a file, never
+editing one:** an edited file has already run everywhere it was going to run.
+
+It is emphatically not replayed as desired state. `create table if not exists`
+silently ignores a definition that has changed, which looks like it worked and
+leaves the column you added missing.
+
+A database that predates the ledger — which is every database that exists as
+this lands — is *baselined*: its table files are recorded as applied without
+being run, on the reading that it already matches them. That is a guess, so it
+warns.
 
 **runtime/** is not state. These objects have no contents of their own and the
 file *is* the definition, so last-write-wins is correct rather than a

@@ -272,3 +272,94 @@ def test_the_environment_is_read_whole(stack):
     assert cfg.port == 9001
     assert cfg.postgrest_url == "http://127.0.0.1:9002"
     assert cfg.schema_dir == SCHEMA
+
+
+# --- the chain --------------------------------------------------------------
+#
+# What migrate() could not do until there was a ledger: change a table on a
+# database that already exists. These use a copy of the schema so a test can
+# add a migration to it without editing the repository.
+
+@pytest.fixture
+def copied(blank, tmp_path):
+    """The real schema, somewhere a test may add a file to it."""
+    import shutil
+    target = tmp_path / "schema"
+    shutil.copytree(SCHEMA, target)
+    return Config(database_url=blank.database_url, schema_dir=target)
+
+
+def test_a_new_table_migration_reaches_a_database_that_already_exists(copied):
+    """The whole point. Before the ledger this was impossible: the table track
+    ran only against an empty database, so a column added to the repository
+    never arrived anywhere that mattered."""
+    migrate(copied)
+    (copied.schema_dir / "tables" / "110_canary.sql").write_text(
+        "alter table wiki.document add column canary text;\n")
+
+    result = migrate(copied)
+    assert result.tables == ("110_canary.sql",)
+    with psycopg.connect(copied.database_url, autocommit=True) as c:
+        assert c.execute(
+            "select count(*) from information_schema.columns "
+            "where table_schema='wiki' and table_name='document' "
+            "and column_name='canary'").fetchone()[0] == 1
+
+
+def test_and_runs_exactly_once_however_often_it_starts(copied):
+    """`alter table ... add column` is not idempotent, so a chain that replayed
+    would fail on the second start -- which is the failure you want, and still
+    a failure."""
+    migrate(copied)
+    (copied.schema_dir / "tables" / "110_canary.sql").write_text(
+        "alter table wiki.document add column canary text;\n")
+    migrate(copied)
+    assert migrate(copied).tables == ()
+    assert migrate(copied).tables == ()
+
+
+def test_the_ledger_records_what_ran(copied):
+    migrate(copied)
+    with psycopg.connect(copied.database_url, autocommit=True) as c:
+        recorded = {r[0] for r in c.execute(
+            "select filename from wiki.schema_migration").fetchall()}
+    assert recorded == {p.name for p in schema_files(copied.schema_dir, "tables")}
+
+
+def test_a_failing_migration_is_not_recorded_as_having_run(copied):
+    """Recorded in the same transaction that runs it, so a failure halfway
+    leaves neither the change nor the claim that it happened."""
+    migrate(copied)
+    (copied.schema_dir / "tables" / "110_broken.sql").write_text(
+        "alter table wiki.document add column ok text;\n"
+        "alter table wiki.nonexistent add column bad text;\n")
+
+    with pytest.raises(MigrationError, match="110_broken"):
+        migrate(copied)
+
+    with psycopg.connect(copied.database_url, autocommit=True) as c:
+        assert c.execute("select count(*) from wiki.schema_migration "
+                         "where filename = '110_broken.sql'").fetchone()[0] == 0
+        assert c.execute(
+            "select count(*) from information_schema.columns "
+            "where table_schema='wiki' and table_name='document' "
+            "and column_name='ok'").fetchone()[0] == 0, "half a migration landed"
+
+
+def test_a_database_from_before_the_ledger_is_baselined(blank, stack):
+    """Every database that exists as this lands has the tables and no record of
+    how it got them. The only sane reading is that it matches the files, so
+    they are recorded without being run -- loudly, because it is a guess."""
+    for path in schema_files(SCHEMA, "tables"):
+        subprocess.run(
+            ["psql", "-h", "127.0.0.1", "-p", str(stack.pg_port), "-U", "postgres",
+             "-d", "fswiki_migrate_test", "-v", "ON_ERROR_STOP=1", "-X", "-q",
+             "-f", str(path)], check=True, capture_output=True)
+
+    result = migrate(blank)
+    assert result.baselined == tuple(p.name for p in schema_files(SCHEMA, "tables"))
+    assert result.tables == () and not result.created
+    # And the runtime half still went on, which is what makes the database
+    # usable rather than merely recorded.
+    with psycopg.connect(blank.database_url, autocommit=True) as c:
+        assert c.execute("select count(*) from wiki.role").fetchone()[0] == 7
