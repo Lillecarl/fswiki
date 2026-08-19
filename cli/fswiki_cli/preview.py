@@ -1,12 +1,15 @@
 """A local web view of the wiki, for looking at what you are writing.
 
-`fswiki render` prints one document; this is the same pipeline with a shell
-around it and a URL per page, which is what makes it usable while editing.
+The pages themselves are `fswiki_core.pages`, shared with the server so that
+the preview and the wiki people actually read look and behave like the same
+thing. What is here is the plumbing that is *not* shared: a blocking
+http.server behind an anyio portal, which is right for one person on a laptop
+and wrong for anything else.
 
 **It is read-only by construction, not by convention.** The handler refuses
 every method except GET and HEAD before it looks at the path, so "read-only"
 does not depend on which routes happen to exist today or on nobody adding a
-form later. Nothing in this module calls a write method on the client.
+form later. Nothing in this module or in `pages` calls a write method.
 
 That is a different claim from "safe to expose", and the difference matters
 when `--host` is not loopback. The server holds *your* token and answers as
@@ -33,227 +36,13 @@ import urllib.parse
 import anyio
 import anyio.from_thread
 
+from fswiki_core import pages as pages_mod
 from fswiki_core import render
-from fswiki_core.client import Client, PostgrestError, Unreachable
-
-from . import paths
-
-# Everything the server owns lives under this prefix, so it can never collide
-# with a document path. It is the same reservation render.links makes.
-RESERVED = "/-/"
+from fswiki_core.client import Client, Unreachable
+from fswiki_core.pages import Pages
 
 
-class Preview:
-    """The read side of the wiki, assembled per request."""
-
-    def __init__(self, client: Client, *, backend: str | None = None,
-                 drafts: bool = True) -> None:
-        self._client = client
-        self._backend = backend
-        self._drafts = drafts
-
-    @property
-    def url(self) -> str:
-        """Where the wiki is, for saying so when it is not answering."""
-        return str(self._client.base_url)
-
-    async def manifest(self) -> list[dict]:
-        return await self._client.manifest()
-
-    async def visible(self) -> set[str]:
-        return {row["path"] for row in await self.manifest()}
-
-    async def page(self, path: str) -> tuple[int, str]:
-        """One rendered document, or a not-found page.
-
-        A document that is not there and one that is not ours to read produce
-        the same answer, because `syncable_document` already refuses to tell
-        them apart — and telling them apart is how a link graph leaks.
-        """
-        draft = None
-        if self._drafts:
-            draft = next((d for d in await self._client.drafts()
-                          if d["path"] == path and d.get("content") is not None),
-                         None)
-
-        if draft is not None:
-            text = draft["content"]
-            content_type = draft.get("content_type") or "text/markdown"
-            state = "draft"
-        else:
-            row = await self._client.document(path)
-            if row is None:
-                return 404, _shell("Not here", _missing(path), path, None)
-            text = row.get("content") or ""
-            content_type = row.get("content_type") or "text/markdown"
-            state = f"revision {row.get('version')}"
-
-        try:
-            rendered = render.render(text, content_type=content_type,
-                                     backend=self._backend)
-        except (render.UnknownBackend, render.safety.SanitiserUnavailable) as exc:
-            return 500, _shell("Cannot render", f"<p>{html.escape(str(exc))}</p>",
-                               path, None)
-
-        visible = await self.visible()
-        body = render.links.resolve(
-            rendered.html,
-            lambda target: "/" + paths.to_display(target) if target in visible else None,
-        )
-        return 200, _shell(paths.to_display(path), body, path, state)
-
-    async def index(self) -> str:
-        rows = sorted(await self.manifest(), key=lambda r: r["path"])
-        items = []
-        for row in rows:
-            display = paths.to_display(row["path"])
-            if not display:
-                continue
-            depth = display.count("/")
-            if row.get("is_folder"):
-                items.append(
-                    f'<li style="margin-left:{depth}em" class="folder">'
-                    f'{html.escape(display)}/</li>')
-            else:
-                items.append(
-                    f'<li style="margin-left:{depth}em">'
-                    f'<a href="/{html.escape(display)}">{html.escape(display)}</a></li>')
-        return _shell("Contents", f"<ul class=tree>{''.join(items)}</ul>", "", None)
-
-    async def token(self) -> str:
-        """The change token, for the reload poll. Eleven bytes."""
-        try:
-            return await self._client.change_token() or ""
-        except (PostgrestError, Unreachable):
-            # The poll is a convenience; a server that blinks should cost a
-            # reload that does not happen, never a preview that stops serving
-            # pages it has already rendered.
-            return ""
-
-
-def _missing(path: str) -> str:
-    return (f"<p>Nothing to show at <code>{html.escape(paths.to_display(path))}"
-            f"</code>.</p><p>It may not exist, or it may not be yours to read — "
-            f"this page is deliberately the same either way.</p>")
-
-
-_STYLE = """
-.acting{background:#7c2d12;color:#fff;padding:.4rem .8rem;font:600 .85rem/1.4
-  system-ui,sans-serif;letter-spacing:.02em}
-/* One token set, both schemes. The page is text and the styling should get
-   out of its way; the only things that earn colour are links and the state
-   line, because those are the two things you look for rather than read. */
-:root {
-  --bg: #fdfdfc; --fg: #22201d; --dim: #6b6862;
-  --rule: #e3e0da; --tint: #f4f2ee; --link: #2c5f8a;
-  --measure: 38rem;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #16181a; --fg: #d6d3cd; --dim: #8b8781;
-    --rule: #2b2e31; --tint: #1e2124; --link: #7fb2dc;
-  }
-}
-* { box-sizing: border-box; }
-body {
-  background: var(--bg); color: var(--fg);
-  max-width: var(--measure); margin: 0 auto; padding: 0 1.25rem 6rem;
-  font: 17px/1.65 ui-serif, Charter, "Bitstream Charter", Georgia, serif;
-  -webkit-text-size-adjust: 100%;
-}
-a { color: var(--link); text-decoration-thickness: 1px; text-underline-offset: 2px; }
-
-header {
-  display: flex; justify-content: space-between; align-items: baseline;
-  gap: 1rem; margin: 0 -1.25rem 2.5rem; padding: 1rem 1.25rem;
-  border-bottom: 1px solid var(--rule);
-  font-family: ui-sans-serif, system-ui, sans-serif;
-  position: sticky; top: 0; background: var(--bg);
-}
-header a.brand { color: var(--fg); text-decoration: none; font-weight: 600;
-                 letter-spacing: .02em; }
-.state { font-size: .8rem; color: var(--dim); text-align: right;
-         font-variant-numeric: tabular-nums; }
-
-h1, h2, h3, h4, h5, h6 {
-  font-family: ui-sans-serif, system-ui, sans-serif;
-  line-height: 1.25; margin: 2.2rem 0 .6rem; font-weight: 620;
-}
-h1 { font-size: 1.7rem; margin-top: 0; letter-spacing: -.01em; }
-h2 { font-size: 1.3rem; }
-h3 { font-size: 1.1rem; }
-p, ul, ol, blockquote, table, pre { margin: 0 0 1.1rem; }
-
-code, pre, kbd { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-                 font-size: .875em; }
-code { background: var(--tint); padding: .12em .35em; border-radius: 3px; }
-pre { background: var(--tint); border: 1px solid var(--rule); border-radius: 6px;
-      padding: .85rem 1rem; overflow-x: auto; line-height: 1.5; }
-pre code { background: none; padding: 0; }
-
-blockquote { border-left: 2px solid var(--rule); margin-left: 0;
-             padding-left: 1rem; color: var(--dim); }
-hr { border: 0; border-top: 1px solid var(--rule); margin: 2rem 0; }
-
-table { border-collapse: collapse; width: 100%; font-size: .93em;
-        font-family: ui-sans-serif, system-ui, sans-serif; display: block;
-        overflow-x: auto; }
-th, td { border-bottom: 1px solid var(--rule); padding: .45rem .7rem;
-         text-align: left; }
-th { font-weight: 600; }
-tbody tr:last-child td { border-bottom: 0; }
-
-/* The index. Indentation carries the tree, so nothing else has to. */
-ul.tree { list-style: none; padding: 0; font-family: ui-sans-serif, system-ui, sans-serif;
-          font-size: .95rem; }
-ul.tree li { padding: .12rem 0; }
-ul.tree a { text-decoration: none; }
-ul.tree a:hover { text-decoration: underline; }
-ul.tree .folder { color: var(--dim); font-size: .8rem; letter-spacing: .04em;
-                  text-transform: uppercase; margin-top: 1rem; }
-"""
-
-# Reload on change, by polling the same eleven-byte token the mount polls.
-# Deliberately a poll and not a socket: there is no write path here to keep
-# open, and this way the whole server stays GET-only.
-_RELOAD = """
-(function () {
-  var seen = null;
-  setInterval(function () {
-    fetch('/-/changed').then(function (r) { return r.text(); }).then(function (t) {
-      if (seen === null) { seen = t; return; }
-      if (t !== seen) { location.reload(); }
-    }).catch(function () {});
-  }, 2000);
-})();
-"""
-
-
-# Set once at startup from the client, because the whole failure mode of
-# impersonation is forgetting you are doing it. A page that looks exactly like
-# your own wiki, minus a few things, is indistinguishable from your own wiki
-# having lost a few things — so this is on every page rather than on a status
-# screen someone has to think to visit.
-_ACTING_AS: str | None = None
-
-
-def _shell(title: str, body: str, path: str, state: str | None) -> str:
-    crumb = html.escape(paths.to_display(path)) if path else "Contents"
-    banner = (f"<div class=acting>viewing as {html.escape(_ACTING_AS)}"
-              f" &middot; read-only</div>" if _ACTING_AS else "")
-    return (
-        "<!doctype html><html><head><meta charset=utf-8>"
-        f"<meta name=viewport content='width=device-width,initial-scale=1'>"
-        f"<title>{html.escape(title)}</title><style>{_STYLE}</style></head><body>"
-        f"{banner}"
-        f"<header><a class=brand href='/'>fswiki</a>"
-        f"<span class=state>{crumb}{' &middot; ' + html.escape(state) if state else ''}"
-        f"</span></header>{body}"
-        f"<script>{_RELOAD}</script></body></html>"
-    )
-
-
-def _handler(preview: Preview, portal: anyio.from_thread.BlockingPortal):
+def _handler(pages: Pages, portal: anyio.from_thread.BlockingPortal):
     class Handler(http.server.BaseHTTPRequestHandler):
         server_version = "fswiki-preview"
         protocol_version = "HTTP/1.1"
@@ -279,7 +68,7 @@ def _handler(preview: Preview, portal: anyio.from_thread.BlockingPortal):
         def do_GET(self, body: bool = True):
             route = urllib.parse.urlsplit(self.path).path
             try:
-                status, kind, payload = portal.call(_respond, preview, route)
+                status, kind, payload = portal.call(pages.respond, route)
             except Unreachable:
                 # 502 rather than 500: this server is fine, the one behind it is
                 # not, and a preview left open in a tab is going to meet that
@@ -287,13 +76,8 @@ def _handler(preview: Preview, portal: anyio.from_thread.BlockingPortal):
                 # exception name below, because it carries the reload poll --
                 # so the tab comes back by itself when the wiki does, with
                 # nobody watching for the moment to press refresh.
-                status, kind = 502, "text/html; charset=utf-8"
-                payload = _shell(
-                    "Cannot reach the wiki",
-                    f"<p>Nothing is answering at <code>"
-                    f"{html.escape(str(preview.url))}</code>.</p>"
-                    f"<p>This page reloads itself when it comes back.</p>",
-                    "", None).encode()
+                status, kind = 502, pages_mod.HTML
+                payload = pages.unreachable().encode()
             except Exception as exc:  # noqa: BLE001 - one bad page, not a dead server
                 status, kind = 500, "text/plain; charset=utf-8"
                 payload = f"{type(exc).__name__}: {exc}\n".encode()
@@ -315,46 +99,15 @@ def _handler(preview: Preview, portal: anyio.from_thread.BlockingPortal):
     return Handler
 
 
-async def _respond(preview: Preview, route: str) -> tuple[int, str, bytes]:
-    html_type = "text/html; charset=utf-8"
-
-    if route == "/-/changed":
-        return 200, "text/plain; charset=utf-8", (await preview.token()).encode()
-
-    if route.startswith(RESERVED + "fswiki/"):
-        # A link that was never resolved. Rather than serving it, answer the
-        # permission question it represents and redirect or refuse.
-        target = route[len(RESERVED + "fswiki/"):]
-        if target in await preview.visible():
-            return 200, html_type, _shell(
-                "Redirecting", f'<meta http-equiv=refresh '
-                f'content="0;url=/{html.escape(paths.to_display(target))}">',
-                target, None).encode()
-        return 404, html_type, _shell("Not here", _missing(target), target, None).encode()
-
-    if route.startswith(RESERVED):
-        return 404, "text/plain; charset=utf-8", b"no such thing\n"
-
-    if route in ("/", ""):
-        return 200, html_type, (await preview.index()).encode()
-
-    try:
-        path = paths.resolve(urllib.parse.unquote(route.lstrip("/")))
-    except paths.PathError:
-        return 404, html_type, _shell("Not here", "<p>Not a path this wiki can hold.</p>",
-                                      "", None).encode()
-
-    status, page = await preview.page(path)
-    return status, html_type, page.encode()
-
-
 async def serve(client: Client, *, host: str, port: int,
                 backend: str | None = None, drafts: bool = True,
                 acting_as: str | None = None) -> int:
     """Run until interrupted. Returns a process exit code."""
-    global _ACTING_AS
-    _ACTING_AS = acting_as
-    preview = Preview(client, backend=backend, drafts=drafts)
+    pages = Pages(client, backend=backend, drafts=drafts, banner=acting_as,
+                  # A preview is for while you are writing, so it reloads
+                  # itself. The server serves many people and has no drafts of
+                  # theirs to notice changing; it does not.
+                  live_reload=True)
 
     # Fail before binding if the renderer is not installed, rather than
     # serving a wall of 500s.
@@ -370,7 +123,7 @@ async def serve(client: Client, *, host: str, port: int,
         address_family = socket.AF_INET6 if ":" in host else socket.AF_INET
 
     async with anyio.from_thread.BlockingPortal() as portal:
-        httpd = Server((host, port), _handler(preview, portal))
+        httpd = Server((host, port), _handler(pages, portal))
         shown = host if host not in ("0.0.0.0", "::") else _guess_address()
         print(f"fswiki preview on http://{shown}:{httpd.server_address[1]}/",
               file=sys.stderr)

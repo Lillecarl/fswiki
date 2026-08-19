@@ -91,6 +91,23 @@ def ltree_parent(path: str) -> str | None:
     return head if sep else None
 
 
+def to_display(path: str) -> str:
+    """`root.public.welcome` -> `public/welcome`. The inverse of from_display().
+
+    Without the extension: the content type is not in the path, and guessing
+    one for a title or a URL would be worse than leaving it off.
+    """
+    labels = ltree_labels(path)
+    if labels and labels[0] == "root":
+        labels = labels[1:]
+    return "/".join(labels) or "/"
+
+
+def looks_like_ltree(value: str) -> bool:
+    """Whether something a person typed is already a wiki path."""
+    return value.startswith("root.") or value == "root"
+
+
 def from_display(path: str) -> str:
     """`public/welcome` -> `root.public.welcome`.
 

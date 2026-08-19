@@ -24,6 +24,7 @@ python3Packages.buildPythonPackage {
   pythonImportsCheck = [
     "fswiki_core" "fswiki_core.client" "fswiki_core.naming" "fswiki_core.merge"
     "fswiki_core.render" "fswiki_core.render.links" "fswiki_core.render.registry"
+    "fswiki_core.pages"
   ];
 
   meta.description = "PostgREST access and path naming, shared by the fswiki clients";

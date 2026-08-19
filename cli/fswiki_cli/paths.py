@@ -35,10 +35,6 @@ def from_xattr(value: str) -> str | None:
     return raw.decode("utf-8", errors="replace") or None
 
 
-def looks_like_ltree(value: str) -> bool:
-    return value.startswith("root.") or value == "root"
-
-
 def from_filesystem(value: str) -> str:
     """`public/welcome.md` -> `root.public.welcome`.
 
@@ -79,13 +75,8 @@ def resolve(value: str) -> str:
     return from_filesystem(value)
 
 
-def to_display(path: str) -> str:
-    """`root.public.welcome` -> `public/welcome`, for printing.
-
-    Without the extension: the content type is not in the path, and guessing one
-    for a report would be worse than leaving it off.
-    """
-    labels = naming.ltree_labels(path)
-    if labels and labels[0] == "root":
-        labels = labels[1:]
-    return "/".join(labels) or "/"
+# Both of these are core's now: a browser needs them as much as a terminal
+# does, and the browser-facing server has no business importing the CLI. Kept
+# as names here because this is where the rest of the module's callers look.
+looks_like_ltree = naming.looks_like_ltree
+to_display = naming.to_display
