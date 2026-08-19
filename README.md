@@ -83,18 +83,45 @@ develop holes that depend on what you read earlier. See
 | [`fuse/`](fuse/) | `fswiki-mount`. The tree, on **trio** — pyfuse3's native backend. |
 | [`cli/`](cli/) | `fswiki`. status, diff, push, revert, merge, render, preview. |
 | [`dev/`](dev/) | Real Postgres and PostgREST under process-compose. Nothing is mocked. |
-| [`test/`](test/) | 671 tests against all of it, at 91% of the lines. See [test/README.md](test/README.md). |
+| [`test/`](test/) | 756 tests against all of it, at 91% of the lines. See [test/README.md](test/README.md). |
 
 ## Running it
 
-```console
-$ nix-build ./dev && ./result/bin/fswiki-dev
-$ eval "$(fswiki-dev env)"
-$ export FSWIKI_TOKEN=$(fswiki-dev token bob)
+Everything is an attribute of the top-level `default.nix`, so one form runs all
+of it. No flake, no `nix develop`, nothing to install:
 
-$ nix build --file . fuse cli
-$ fswiki-mount ~/wiki
+| | |
+| --- | --- |
+| `nix run --file . dev` | Postgres + PostgREST under process-compose |
+| `nix run --file . server` | the browser-facing reader, `fswiki-serve` |
+| `nix run --file . cli -- <args>` | `fswiki` — status, diff, push, render, preview |
+| `nix run --file . fuse -- ~/wiki` | `fswiki-mount` |
+| `nix run --file . tests -- <pytest args>` | the suite |
+| `nix build --file . tests.check -L` | the half of it that runs in a sandbox |
+| `nix build --file . cli fuse server` | put them in `./result*` instead |
+
+Everything after `--` goes to the program. `nix run` builds first, so the first
+one is slow and the rest are not.
+
+**Start the stack, then point a client at it.**
+
+```console
+$ nix run --file . dev                      # leave this running
 ```
+
+In another shell:
+
+```console
+$ eval "$(nix run --file . dev -- env)"     # FSWIKI_URL, FSWIKI_TOKEN, PGPORT
+$ export FSWIKI_TOKEN=$(nix run --file . dev -- token bob)
+
+$ nix run --file . fuse -- ~/wiki
+```
+
+`nix run --file . dev -- reset` wipes `.dev/` and rebuilds the database from
+scratch, which is how you reload the schema — the table half is not idempotent
+by design. [`dev/README.md`](dev/README.md) has the ports, the fixture users and
+what the seed builds.
 
 The dev stack is Postgres on `127.0.0.1:55432` and PostgREST on `:3000`, loaded
 with fixture users (`alice bob carol dave erin frank grace`) whose ACLs are
@@ -102,12 +129,20 @@ built to have interesting shapes rather than tidy ones. `fswiki-dev token bob`
 signs a JWT with a local secret in exactly the form `wiki.current_user_id()`
 resolves — no OIDC provider needed until there is one.
 
-To read the wiki in a browser without running any client at all:
+**Read the wiki in a browser**, without running any client at all. The server
+is a separate program from the dev stack: it applies the schema itself and
+starts a PostgREST of its own, so point it at the *database* rather than at the
+dev stack's PostgREST.
 
 ```console
-$ export FSWIKI_DATABASE_URL=postgres://you@127.0.0.1:55432/fswiki
+$ export FSWIKI_DATABASE_URL=postgres://postgres@127.0.0.1:55432/fswiki
+$ export FSWIKI_JWT_SECRET=$(cat .dev/jwt-secret)   # so it accepts dev tokens
+$ export FSWIKI_POSTGREST_PORT=3001                 # :3000 is the dev stack's
 $ nix run --file . server
 ```
+
+Then <http://127.0.0.1:8080>. [`server/README.md`](server/README.md) has the
+rest of the environment, including `FSWIKI_RENDER_CACHE_BYTES`.
 
 It loads the schema if the database is empty, starts a PostgREST of its own,
 and serves. There is no login yet: a token goes in a `fswiki_session` cookie or
@@ -115,10 +150,11 @@ an `Authorization` header, and a visitor without one sees whatever has been
 granted to the built-in `public` group — which is nothing until somebody grants
 it something.
 
-There is a browser view too, for while you are writing:
+There is a browser view too, for while you are writing. Unlike the server it
+shows **your drafts**, and it reloads itself:
 
 ```console
-$ fswiki preview
+$ nix run --file . cli -- preview
 fswiki preview on http://127.0.0.1:8222/
   read-only; ctrl-c to stop
 ```
@@ -129,8 +165,8 @@ anything changes.
 ## Testing
 
 ```console
-$ nix build --file . tests.check -L      # 519 tests, ~40s, in a pure build sandbox
-$ nix run --file . tests                 # everything, if you have /dev/fuse
+$ nix build --file . tests.check -L      # 604 tests, ~45s, in a pure build sandbox
+$ nix run --file . tests                 # all 756, if you have /dev/fuse
 ```
 
 The mount tests need a real `/dev/fuse` and a namespace to mount in;

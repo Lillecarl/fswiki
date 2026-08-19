@@ -226,5 +226,11 @@ in
 pkgs.symlinkJoin {
   name = "fswiki-dev-env";
   paths = [ runner tokenTool ];
-  meta.description = "Local Postgres + PostgREST stack for fswiki, under process-compose";
+  meta = {
+    description = "Local Postgres + PostgREST stack for fswiki, under process-compose";
+    # Without this `nix run --file . dev` looks for a `fswiki-dev-env` binary,
+    # which is the derivation's name and not a program. Two binaries live here;
+    # this names the one you start the stack with.
+    mainProgram = "fswiki-dev";
+  };
 }

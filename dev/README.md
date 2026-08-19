@@ -3,10 +3,14 @@
 Real Postgres, real PostgREST, under process-compose. Nothing is mocked; the
 client talks to the same thing production would.
 
-    nix-build ./dev && ./result/bin/fswiki-dev
+    nix run --file .. dev             # from this directory
+    nix run --file . dev              # from the checkout root
 
-    ./result/bin/fswiki-dev reset     # wipe state and rebuild from scratch
-    ./result/bin/fswiki-dev --tui=false   # headless, for scripts and CI
+    nix run --file . dev -- reset          # wipe state and rebuild from scratch
+    nix run --file . dev -- --tui=false    # headless, for scripts and CI
+
+`nix build --file . dev` puts it in `./result/bin/fswiki-dev` instead, which is
+what you want if you are going to run it more than once in a shell.
 
 | | |
 | --- | --- |

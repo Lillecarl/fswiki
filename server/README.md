@@ -20,7 +20,16 @@ from 16 on, and slugs depend on that.
 ## The server
 
     $ export FSWIKI_DATABASE_URL=postgres://you@localhost:5432/fswiki
-    $ nix run --file .. server
+    $ nix run --file .. server        # from this directory
+    $ nix run --file . server         # from the checkout root
+
+Against the dev stack, point it at the *database* rather than at the dev
+stack's PostgREST — it starts one of its own, so give it a port that is free:
+
+    $ export FSWIKI_DATABASE_URL=postgres://postgres@127.0.0.1:55432/fswiki
+    $ export FSWIKI_JWT_SECRET=$(cat .dev/jwt-secret)
+    $ export FSWIKI_POSTGREST_PORT=3001
+    $ nix run --file . server
 
 Three phases, in that order, and the order is the program:
 
