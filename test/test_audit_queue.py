@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 
+import anyio
 import pytest
 
 from fswiki_fuse.audit import AuditLog, QUEUE_CAP_BYTES, _batched
@@ -239,3 +240,103 @@ def _spooled(tmp_path) -> list[dict]:
         if f.exists():
             out += [json.loads(l) for l in f.read_text().splitlines() if l.strip()]
     return out
+
+
+# ---------------------------------------------------------------------------
+# Minting and queueing in one step
+# ---------------------------------------------------------------------------
+
+async def test_recording_mints_and_queues_together(tmp_path):
+    """The common case for everything but a read. A read mints the event and
+    offers it to the fetch first, because a request that carries the event is
+    durable in a way a local queue is not; everything else has no fetch to
+    hang it on."""
+    log, stub = make(tmp_path)
+    minted = log.record(document_id=None, path="root.a", action="denied")
+    await log.flush()
+    assert stub.shipped == [minted]
+    assert minted["action"] == "denied"
+    assert minted["event_id"] and minted["occurred_at"]
+
+
+async def test_every_event_gets_its_own_identity(tmp_path):
+    """record_opens is idempotent on the id, which is what lets a client that
+    never saw the response resend the batch. Two events sharing an id would
+    make the second one vanish."""
+    log, stub = make(tmp_path)
+    for _ in range(5):
+        log.record(document_id=None, path="root.a")
+    await log.flush()
+    assert len({e["event_id"] for e in stub.shipped}) == 5
+
+
+# ---------------------------------------------------------------------------
+# When the disk says no
+# ---------------------------------------------------------------------------
+
+async def test_a_disk_that_refuses_the_write_does_not_take_the_mount_down(
+        tmp_path, caplog):
+    """This runs inside open(). A full or read-only disk is an ordinary thing
+    for a laptop to be, and an exception out of a FUSE handler does not fail
+    the syscall — it comes out of pyfuse3.main() and unmounts everything."""
+    # A file where the spool directory should be, rather than a chmod: this
+    # has to fail the same way when the suite runs as root, and root ignores
+    # permission bits.
+    (tmp_path / "spool").write_text("not a directory")
+
+    log, stub = make(tmp_path)
+    log.record(document_id=None, path="root.a")
+    assert "could not queue" in caplog.text
+
+    await log.flush()
+    assert stub.shipped == []
+
+
+async def test_a_blank_line_in_the_queue_is_skipped_silently(tmp_path):
+    """Distinct from a torn line: a stray newline is not a lost event and
+    counting it as malformed would report damage that did not happen."""
+    log, stub = make(tmp_path)
+    log.record(document_id=None, path="root.a")
+    live = tmp_path / "spool" / "audit.jsonl"
+    live.write_text(live.read_text() + "\n   \n")
+    await log.flush()
+    assert len(stub.shipped) == 1
+
+
+# ---------------------------------------------------------------------------
+# The shipper task
+# ---------------------------------------------------------------------------
+
+async def test_the_shipper_drains_on_its_own(tmp_path):
+    """`run()` is what the mount actually starts; every test above calls
+    flush() by hand and so never exercises the loop around it."""
+    log, stub = make(tmp_path)
+    log.record(document_id=None, path="root.a")
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(log.run)
+        with anyio.fail_after(5):
+            while not stub.shipped:
+                await anyio.sleep(0.01)
+        tg.cancel_scope.cancel()
+    assert len(stub.shipped) == 1
+
+
+async def test_the_shipper_survives_a_server_that_is_refusing(tmp_path, caplog):
+    """The one property that matters about the loop. A shipper that dies on a
+    failed flush stops shipping *forever*, and nothing says so: the mount
+    keeps working, the queue keeps filling, and the trail quietly stops. It
+    must log and come back round."""
+    log, stub = make(tmp_path, fail=True)
+    log.record(document_id=None, path="root.a")
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(log.run)
+        with anyio.fail_after(5):
+            while "audit flush failed" not in caplog.text:
+                await anyio.sleep(0.01)
+        # Still alive: the server comes back, and the queue it kept goes out.
+        stub.fail = False
+        with anyio.fail_after(5):
+            while not stub.shipped:
+                await anyio.sleep(0.01)
+        tg.cancel_scope.cancel()
+    assert [e["path"] for e in stub.shipped] == ["root.a"]
