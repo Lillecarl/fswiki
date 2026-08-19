@@ -52,6 +52,11 @@ class Preview:
         self._backend = backend
         self._drafts = drafts
 
+    @property
+    def url(self) -> str:
+        """Where the wiki is, for saying so when it is not answering."""
+        return str(self._client.base_url)
+
     async def manifest(self) -> list[dict]:
         return await self._client.manifest()
 
@@ -275,6 +280,20 @@ def _handler(preview: Preview, portal: anyio.from_thread.BlockingPortal):
             route = urllib.parse.urlsplit(self.path).path
             try:
                 status, kind, payload = portal.call(_respond, preview, route)
+            except Unreachable:
+                # 502 rather than 500: this server is fine, the one behind it is
+                # not, and a preview left open in a tab is going to meet that
+                # every time a laptop sleeps. An HTML page rather than the
+                # exception name below, because it carries the reload poll --
+                # so the tab comes back by itself when the wiki does, with
+                # nobody watching for the moment to press refresh.
+                status, kind = 502, "text/html; charset=utf-8"
+                payload = _shell(
+                    "Cannot reach the wiki",
+                    f"<p>Nothing is answering at <code>"
+                    f"{html.escape(str(preview.url))}</code>.</p>"
+                    f"<p>This page reloads itself when it comes back.</p>",
+                    "", None).encode()
             except Exception as exc:  # noqa: BLE001 - one bad page, not a dead server
                 status, kind = 500, "text/plain; charset=utf-8"
                 payload = f"{type(exc).__name__}: {exc}\n".encode()

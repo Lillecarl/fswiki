@@ -83,8 +83,13 @@ class Client:
             headers["Fswiki-Act-As-Groups"] = ",".join(act_as_groups)
         # Every read below has two forms because of this flag. See _reading().
         self.impersonating = bool(act_as or act_as_groups)
+        # Kept in plain sight: every caller that reports "cannot reach it" wants
+        # to name the address, and digging it back out of the httpx client is
+        # both awkward and a way to print something subtly different from what
+        # was asked for.
+        self.base_url = base_url.rstrip("/")
         self._http = httpx.AsyncClient(
-            base_url=base_url.rstrip("/"),
+            base_url=self.base_url,
             headers=headers,
             timeout=timeout,
         )
