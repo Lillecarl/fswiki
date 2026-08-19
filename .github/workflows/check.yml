@@ -28,11 +28,20 @@ jobs:
       - run: nix build --file . core cli fuse -L
 
   # The other half, which needs a real /dev/fuse and so cannot live in a build
-  # sandbox. Outside the sandbox it needs three things from the runner:
-  # /dev/fuse itself, unprivileged user namespaces, and a /etc/subuid range for
-  # --map-auto. The step below reports all three before trying, so a failure
-  # here says which one was missing rather than whatever libfuse says about an
-  # open() it could not make.
+  # sandbox.
+  #
+  # Not the `unshare --user --map-auto --map-root-user` invocation that works on
+  # a workstation. Measured on a runner: /dev/fuse is there and /etc/subuid has
+  # a range, but the user namespace never carries CAP_SYS_ADMIN into the mount
+  # namespace -- `unshare: cannot change root filesystem propagation:
+  # Permission denied`, and a plain --map-root-user cannot even write
+  # /proc/self/uid_map. The whole reason for the user namespace locally is to
+  # become root without being root; a runner is ephemeral and hands out sudo, so
+  # here we simply are.
+  #
+  # Postgres still refuses to run as root, which the suite already handles: as
+  # uid 0 it drops initdb and pg_ctl to uid 1000. That is the same code path the
+  # workstation invocation exercises, for the same reason.
   mount:
     runs-on: ubuntu-latest
     steps:
@@ -45,12 +54,13 @@ jobs:
       - name: What this runner has
         run: |
           ls -l /dev/fuse || echo 'NO /dev/fuse'
-          cat /proc/sys/kernel/unprivileged_userns_clone 2>/dev/null || echo '(no such sysctl; fine)'
-          cat /etc/subuid || echo 'NO /etc/subuid'
-          unshare --user --map-root-user id || echo 'NO user namespaces'
+          command -v fusermount3 || echo '(no system fusermount3; the nix one is used)'
 
       - name: The whole suite, mounts included
         run: |
           runner=$(nix build --file . tests --no-link --print-out-paths)/bin/fswiki-test
-          unshare --user --map-auto --map-root-user --mount --propagation private \
+          # A mount namespace so a suite that dies mid-run leaves nothing behind,
+          # and `env PATH` because sudo resets it and the nix profile is on it.
+          sudo env "PATH=$PATH" "FSWIKI_ROOT=$PWD" \
+            unshare --mount --propagation private \
             "$runner" -p no:cacheprovider
