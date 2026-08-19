@@ -190,7 +190,7 @@ async def run(args: argparse.Namespace) -> int:
         )
         try:
             tree = await fs.refresh(force=True)
-        except PostgrestError as exc:
+        except (PostgrestError, Unreachable) as exc:
             log.error("cannot read the wiki: %s", exc)
             return 1
         log.info("mounted %d entries at %s", len(tree.nodes), args.mountpoint)

@@ -215,7 +215,7 @@ async def run(args: argparse.Namespace) -> int:
         wanted = None if not args.paths else [d["path"] for d in selected]
         try:
             results = await client.push(args.message, wanted)
-        except PostgrestError as exc:
+        except (PostgrestError, Unreachable) as exc:
             print(f"fswiki: push failed: {exc}", file=sys.stderr)
             return 1
 
@@ -282,7 +282,7 @@ async def _merge(client: Client, principal: str, drafts: list[dict],
                     draft["path"], merged.text, current,
                     conflicted=not merged.clean,
                 )
-            except PostgrestError as exc:
+            except (PostgrestError, Unreachable) as exc:
                 print(f"fswiki: could not rewrite the draft for {display}: {exc}",
                       file=sys.stderr)
                 return 1
@@ -309,7 +309,7 @@ async def _abort_merge(client: Client, drafts: list[dict]) -> int:
             if await client.abort_merge(draft["path"]) is None:
                 print(f"fswiki: no draft of yours at {display}", file=sys.stderr)
                 return 1
-        except PostgrestError as exc:
+        except (PostgrestError, Unreachable) as exc:
             print(f"fswiki: could not back out {display}: {exc}", file=sys.stderr)
             return 1
         print(f"  {report.green('restored'.rjust(10))}  {display}")
@@ -414,7 +414,7 @@ async def _revert(client: Client, drafts: list[dict], *, apply: bool) -> int:
             if not await client.delete_draft(draft["path"]):
                 print(f"fswiki: no draft of yours at {display}", file=sys.stderr)
                 return 1
-        except PostgrestError as exc:
+        except (PostgrestError, Unreachable) as exc:
             print(f"fswiki: could not withdraw {display}: {exc}", file=sys.stderr)
             return 1
 
@@ -433,7 +433,7 @@ async def _published_text(client: Client, draft: dict) -> str | None:
         return None
     try:
         return (await client.content(document_id)).decode("utf-8", errors="replace")
-    except (LookupError, PostgrestError):
+    except (LookupError, PostgrestError, Unreachable):
         return None
 
 

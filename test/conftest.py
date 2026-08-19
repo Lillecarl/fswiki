@@ -261,35 +261,8 @@ def stack():
         _load(pg_port, ROOT / "server" / "test" / "010_fixtures.sql")
         _load(pg_port, ROOT / "dev" / "seed.sql")
 
-        env = dict(os.environ)
-        env.update(
-            PGRST_DB_URI=f"postgres://fswiki_authenticator@127.0.0.1:{pg_port}/fswiki",
-            PGRST_DB_SCHEMAS="wiki",
-            PGRST_DB_ANON_ROLE="fswiki_anon",
-            PGRST_JWT_SECRET=secret,
-            PGRST_SERVER_HOST="127.0.0.1",
-            PGRST_SERVER_PORT=str(http_port),
-            PGRST_DB_POOL="4",
-            # The only door into impersonation; without it half the suite is
-            # testing a feature that is not switched on.
-            PGRST_DB_PRE_REQUEST="wiki.pre_request",
-        )
-        log = open(tmp / "postgrest.log", "w")
-        postgrest = subprocess.Popen(["postgrest"], env=env, stdout=log, stderr=log)
+        postgrest = _start_postgrest(stack, http_port, tmp / "postgrest.log")
         stack.procs.append(postgrest)
-
-        def up():
-            if postgrest.poll() is not None:
-                raise AssertionError(
-                    "postgrest exited: " + (tmp / "postgrest.log").read_text())
-            # A real query as a real user, not just "the socket answers".
-            # PostgREST accepts connections while its schema cache is still
-            # loading and returns 503 to everything, which arrives at the
-            # client as an ordinary failed request several tests later.
-            return http(stack.url + "/syncable_document?select=id&limit=1",
-                        token=stack.token("bob"), timeout=2).code == 200
-
-        wait_for(up, timeout=30, what="postgrest to serve queries")
         yield stack
     finally:
         if postgrest is not None:
@@ -301,6 +274,91 @@ def stack():
         _as_postgres(["pg_ctl", "-D", str(datadir), "stop", "-m", "immediate"],
                      capture_output=True)
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _start_postgrest(stack: Stack, port: int, log_path: Path) -> subprocess.Popen:
+    """One PostgREST against `stack`'s cluster, ready to serve queries.
+
+    Factored out because a test that wants to know what a client does when the
+    server goes away needs a PostgREST it is allowed to kill, and killing the
+    session's own would take every later test with it.
+    """
+    env = dict(os.environ)
+    env.update(
+        PGRST_DB_URI=f"postgres://fswiki_authenticator@127.0.0.1:{stack.pg_port}/fswiki",
+        PGRST_DB_SCHEMAS="wiki",
+        PGRST_DB_ANON_ROLE="fswiki_anon",
+        PGRST_JWT_SECRET=stack.secret,
+        PGRST_SERVER_HOST="127.0.0.1",
+        PGRST_SERVER_PORT=str(port),
+        PGRST_DB_POOL="4",
+        # The only door into impersonation; without it half the suite is
+        # testing a feature that is not switched on.
+        PGRST_DB_PRE_REQUEST="wiki.pre_request",
+    )
+    log = open(log_path, "a")
+    proc = subprocess.Popen(["postgrest"], env=env, stdout=log, stderr=log)
+
+    def up():
+        if proc.poll() is not None:
+            raise AssertionError("postgrest exited: " + log_path.read_text())
+        # A real query as a real user, not just "the socket answers". PostgREST
+        # accepts connections while its schema cache is still loading and
+        # returns 503 to everything, which arrives at the client as an ordinary
+        # failed request several tests later.
+        try:
+            return http(f"http://127.0.0.1:{port}/syncable_document?select=id&limit=1",
+                        token=stack.token("bob"), timeout=2).code == 200
+        except urllib.error.URLError:
+            # Not listening yet. Only a refused connection is "not yet"; a
+            # server that answers badly is a failure and must not be waited out.
+            return False
+
+    wait_for(up, timeout=30, what=f"postgrest on {port} to serve queries")
+    return proc
+
+
+@dataclass
+class Spare:
+    """A PostgREST of one test's own, which it may stop and start again."""
+    url: str
+    log: Path
+    _stack: Stack
+    _port: int
+    _proc: subprocess.Popen | None
+
+    def stop(self) -> None:
+        """Take the server away, the way a laptop lid does."""
+        if self._proc is None:
+            return
+        self._proc.terminate()
+        try:
+            self._proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self._proc.kill()
+        self._proc = None
+        # Not just "the process is gone": until the socket is actually closed a
+        # client can still connect and hang, and a test that raced that would
+        # be flaky in the least reproducible way there is.
+        wait_for(lambda: not answers(self.url + "/"),
+                 what="the port to stop answering")
+
+    def start(self) -> None:
+        if self._proc is None:
+            self._proc = _start_postgrest(self._stack, self._port, self.log)
+
+
+@pytest.fixture
+def spare(stack, tmp_path):
+    """A second PostgREST on the same database, for tests that kill one."""
+    port = free_port()
+    log = tmp_path / "spare-postgrest.log"
+    s = Spare(url=f"http://127.0.0.1:{port}", log=log, _stack=stack,
+              _port=port, _proc=_start_postgrest(stack, port, log))
+    try:
+        yield s
+    finally:
+        s.stop()
 
 
 def _load(port: int, path: Path, *, db: str = "fswiki") -> None:
@@ -413,6 +471,18 @@ class Mount:
     def write(self, rel: str, text: str) -> None:
         (self.path / rel).write_text(text)
 
+    def stop(self) -> None:
+        """Unmount and wait for the process, for tests about what survives it.
+
+        Idempotent, so the factory's own teardown can run over a mount a test
+        has already stopped.
+        """
+        subprocess.run(["fusermount3", "-u", str(self.path)], capture_output=True)
+        try:
+            self.proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+
 
 @pytest.fixture(scope="session")
 def mount_factory(stack, tmp_path_factory):
@@ -448,11 +518,7 @@ def mount_factory(stack, tmp_path_factory):
         yield start
     finally:
         for m in live:
-            subprocess.run(["fusermount3", "-u", str(m.path)], capture_output=True)
-            try:
-                m.proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                m.proc.kill()
+            m.stop()
 
 
 @pytest.fixture(scope="session")

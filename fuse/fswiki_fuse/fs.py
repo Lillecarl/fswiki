@@ -31,7 +31,14 @@ import anyio
 import pyfuse3
 
 from fswiki_core import naming
-from fswiki_core.client import Client, PostgrestError
+# Both, everywhere, and never one without the other. An exception out of a FUSE
+# handler does not fail the syscall — it comes out of pyfuse3.main() and takes
+# the whole filesystem down, leaving a mountpoint that hangs every `ls` until
+# someone unmounts it by hand. PostgrestError is "the server said no";
+# Unreachable is "there was no server", which is httpx.TransportError and
+# therefore not an OSError either. A handler that catches only the first works
+# perfectly until the wifi drops.
+from fswiki_core.client import Client, PostgrestError, Unreachable
 from . import procinfo
 from .audit import AuditLog
 from .inodes import ROOT_INODE, InodeTable
@@ -83,6 +90,20 @@ class _Carrier:
 
     event: dict | None
     taken: bool = False
+
+
+def _errno_for(exc: PostgrestError | Unreachable) -> int:
+    """EACCES when the server refused us, EIO for anything else.
+
+    `Unreachable` has no `status` — there was no response for one to be on —
+    and reaching for it regardless is how a network blink turned into an
+    AttributeError raised out of a FUSE handler. That does not fail the write;
+    it ends the filesystem. Asking what the exception *is* costs one isinstance
+    and cannot go wrong that way.
+    """
+    return (errno.EACCES
+            if isinstance(exc, PostgrestError) and exc.status in (401, 403)
+            else errno.EIO)
 
 
 class FswikiFs(pyfuse3.Operations):
@@ -198,7 +219,7 @@ class FswikiFs(pyfuse3.Operations):
                     if token is None:
                         log.debug("server has no change_token(); refetching every poll")
                         self._token_supported = False
-                except PostgrestError as exc:
+                except (PostgrestError, Unreachable) as exc:
                     log.debug("change_token failed, refetching: %s", exc)
 
             if (
@@ -226,7 +247,7 @@ class FswikiFs(pyfuse3.Operations):
     async def _current(self) -> Tree:
         try:
             return await self.refresh()
-        except PostgrestError as exc:
+        except (PostgrestError, Unreachable) as exc:
             log.error("manifest refresh failed: %s", exc)
             if self._tree is None:
                 raise pyfuse3.FUSEError(errno.EIO) from exc
@@ -529,7 +550,7 @@ class FswikiFs(pyfuse3.Operations):
             if carried is not None:
                 carried.taken = True
             raise pyfuse3.FUSEError(errno.ENOENT) from None
-        except PostgrestError as exc:
+        except (PostgrestError, Unreachable) as exc:
             # Nothing committed, so the event did not land either and must go
             # to the queue. Leaving `taken` false is what arranges that.
             log.error("fetching %s: %s", entry.path, exc)
@@ -712,11 +733,9 @@ class FswikiFs(pyfuse3.Operations):
                 content_type=node.content_type,
                 base_version=base_version,
             )
-        except PostgrestError as exc:
+        except (PostgrestError, Unreachable) as exc:
             log.error("saving draft for %s: %s", node.path, exc)
-            raise pyfuse3.FUSEError(
-                errno.EACCES if exc.status in (401, 403) else errno.EIO
-            ) from exc
+            raise pyfuse3.FUSEError(_errno_for(exc)) from exc
 
         await self.refresh(force=True)
 
@@ -783,11 +802,9 @@ class FswikiFs(pyfuse3.Operations):
                 content="",
                 content_type=content_type,
             )
-        except PostgrestError as exc:
+        except (PostgrestError, Unreachable) as exc:
             log.error("creating %s: %s", path, exc)
-            raise pyfuse3.FUSEError(
-                errno.EACCES if exc.status in (401, 403) else errno.EIO
-            ) from exc
+            raise pyfuse3.FUSEError(_errno_for(exc)) from exc
 
         tree = await self.refresh(force=True)
         node = tree.get(f"draft:{path}")
@@ -867,7 +884,7 @@ class FswikiFs(pyfuse3.Operations):
                 document_id=entry.document_id,
                 base_version=entry.version,
             )
-        except PostgrestError as exc:
+        except (PostgrestError, Unreachable) as exc:
             log.error("retiring %s: %s", entry.path, exc)
             raise pyfuse3.FUSEError(errno.EIO) from exc
         await self.refresh(force=True)
@@ -875,7 +892,7 @@ class FswikiFs(pyfuse3.Operations):
     async def _drop_draft(self, path: str) -> None:
         try:
             await self._client.delete_draft(path)
-        except PostgrestError as exc:
+        except (PostgrestError, Unreachable) as exc:
             log.error("dropping draft %s: %s", path, exc)
             raise pyfuse3.FUSEError(errno.EIO) from exc
         await self.refresh(force=True)
@@ -997,7 +1014,7 @@ class FswikiFs(pyfuse3.Operations):
                 document_id=source.document_id,
                 base_version=source.version,
             )
-        except PostgrestError as exc:
+        except (PostgrestError, Unreachable) as exc:
             log.error("moving %s -> %s: %s", source.path, target_path, exc)
             raise pyfuse3.FUSEError(errno.EIO) from exc
         await self.refresh(force=True)
@@ -1011,11 +1028,9 @@ class FswikiFs(pyfuse3.Operations):
                 content=data.decode("utf-8", errors="surrogateescape"),
                 content_type=content_type,
             )
-        except PostgrestError as exc:
+        except (PostgrestError, Unreachable) as exc:
             log.error("creating draft %s: %s", path, exc)
-            raise pyfuse3.FUSEError(
-                errno.EACCES if exc.status in (401, 403) else errno.EIO
-            ) from exc
+            raise pyfuse3.FUSEError(_errno_for(exc)) from exc
         await self.refresh(force=True)
 
     # ------------------------------------------------------------------

@@ -53,9 +53,19 @@ def test_status_with_nothing_pending(cli, clean):
     assert "Nothing pending" in cli("status")
 
 
-def test_an_unreachable_server_is_one_clear_error(cli):
-    r = cli("whoami", FSWIKI_URL="http://127.0.0.1:1")
-    assert r.code == 1 and "cannot reach" in r
+@pytest.mark.parametrize("command", [
+    ["whoami"], ["status"], ["diff"], ["push", "-m", "x"], ["revert"],
+    ["merge"], ["render", "public/welcome.md"],
+])
+def test_an_unreachable_server_is_one_clear_error(cli, command):
+    """Every subcommand, not just whoami. httpx.TransportError is not an
+    OSError, so a command that reached its own request before the shared guard
+    would print a traceback — which is the difference between "the server is
+    down" and "the tool is broken", and the user cannot tell them apart."""
+    r = cli(*command, FSWIKI_URL="http://127.0.0.1:1")
+    assert r.code == 1
+    assert "cannot reach" in r
+    assert "Traceback" not in r
 
 
 # ---------------------------------------------------------------------------

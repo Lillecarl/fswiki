@@ -214,3 +214,103 @@ def test_argv_shipping_says_so_out_loud(stack, tmp_path, mount_factory):
                     what="the warning to be printed")
     assert said
     assert "secrets" in m.log.read_text()
+
+
+# ---------------------------------------------------------------------------
+# When the server is not there
+#
+# The whole reason the queue is on disk rather than in memory. These use a
+# PostgREST of their own, because the interesting move is killing it.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def offline_capable(spare, mount_factory, tmp_path):
+    """A mount pointed at a server this test is allowed to take away."""
+    spool = tmp_path / "spool"
+    m = mount_factory("--audit", "--audit-dir", str(spool), "--audit-interval", "1",
+                      "--url", spare.url)
+    m.spool = spool
+    return m
+
+
+def test_a_read_the_server_never_heard_is_still_spooled(offline_capable, spare, clean):
+    """A queue that only holds what already reached the server would be a
+    cache, not a queue."""
+    m = offline_capable
+    (m / READ).read_text()                       # warm, so the next one is a cache hit
+    wait_for(lambda: events(clean), what="the first read")
+    clean.exec("delete from wiki.access_event")
+
+    spare.stop()
+    (m / READ).read_text()                       # served locally; nothing goes out
+    assert wait_for(lambda: queued(m), what="the read to be spooled")
+
+
+def test_the_queue_ships_when_the_server_comes_back(offline_capable, spare, clean):
+    """Offline is a delay, not a hole. The trail catches up by itself with
+    nobody typing anything."""
+    m = offline_capable
+    (m / READ).read_text()
+    wait_for(lambda: events(clean), what="the first read")
+    clean.exec("delete from wiki.access_event")
+
+    spare.stop()
+    (m / READ).read_text()
+    wait_for(lambda: queued(m), what="the read to be spooled")
+
+    spare.start()
+    assert wait_for(lambda: events(clean), timeout=30,
+                    what="the queue to drain once the server is back")
+    assert wait_for(lambda: not queued(m), timeout=30, what="the spool to empty")
+
+
+def test_a_failed_fetch_does_not_lose_its_event(offline_capable, spare, clean):
+    """The other order: the fetch was going to carry the event, and the fetch
+    failed. Nothing committed, so the event did not land either and has to fall
+    back to the queue — the case where an over-eager "it has been sent" would
+    silently drop reads exactly when the trail matters most."""
+    m = offline_capable
+    spare.stop()
+
+    with pytest.raises(OSError):
+        # Uncached and the server is gone, so this cannot be served at all.
+        (m / "public/guide/permissions.md").read_text()
+
+    spooled = wait_for(lambda: queued(m), what="the failed read to be spooled")
+    assert any(e.get("path") == "root.public.guide.permissions" for e in spooled)
+
+    spare.start()
+    assert wait_for(lambda: events(clean, "root.public.guide.permissions"),
+                    timeout=30, what="the failed read to reach the trail")
+
+
+def test_the_queue_outlives_the_mount(offline_capable, spare, mount_factory, clean):
+    """It is a file on disk, and the point of that is a laptop that is closed
+    with the wifi off and opened somewhere else. A queue that lived in the
+    process would lose the reads whose record matters most."""
+    m = offline_capable
+    (m / READ).read_text()
+    wait_for(lambda: events(clean), what="the first read")
+    clean.exec("delete from wiki.access_event")
+
+    spare.stop()
+    (m / READ).read_text()
+    wait_for(lambda: queued(m), what="the read to be spooled")
+    m.stop()
+
+    spare.start()
+    again = mount_factory("--audit", "--audit-dir", str(m.spool),
+                          "--audit-interval", "1", "--url", spare.url)
+    again.spool = m.spool
+    assert wait_for(lambda: events(clean), timeout=30,
+                    what="the new mount to ship the old mount's queue")
+
+
+def test_the_mount_keeps_serving_what_it_already_has(offline_capable, spare):
+    """Reading through the mount works with no network — that is the promise
+    the cache makes. An audit queue that could not ship must not become a
+    filesystem that cannot read."""
+    m = offline_capable
+    body = (m / READ).read_text()
+    spare.stop()
+    assert (m / READ).read_text() == body

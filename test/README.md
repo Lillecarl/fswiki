@@ -53,7 +53,8 @@ The mount tests are marked, and they are marked precisely so that this works.
 | `test_cli.py` | `fswiki` — status, diff, push, revert, render |
 | `test_merge.py` | the three-way merge, end to end through the mount |
 | `test_mount.py` | the filesystem itself |
-| `test_mount_audit.py` | `fswiki-mount --audit` |
+| `test_mount_audit.py` | `fswiki-mount --audit`, including offline spooling |
+| `test_mount_offline.py` | what the mount does when the server goes away |
 | `test_mount_impersonation.py` | `fswiki-mount --as` |
 | `test_preview.py` | `fswiki preview` |
 
@@ -73,6 +74,12 @@ tip that has moved, which is also closer to what a real wiki does.
 alone: a mount started with `--as` outlives the test that started it and keeps
 polling, and revoking behind its back would fail some unrelated later test with
 a 403 from a filesystem it never asked about.
+
+**A server a test may kill.** The `spare` fixture starts a second PostgREST
+against the same database, with `stop()` and `start()`. Killing the session's
+own would take every later test with it, and "what happens when the server goes
+away" is not answerable any other way — it is also where two of the suite's
+first real bugs were.
 
 **Never sleep; wait for the thing.** The mount polls, the audit shipper
 batches, PostgREST loads a schema cache. `wait_for()` polls a predicate and
