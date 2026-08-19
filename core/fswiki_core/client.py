@@ -61,17 +61,23 @@ class PostgrestError(RuntimeError):
 
 
 class Client:
-    """One connection pool, one identity.
+    """One identity, and by default a connection pool of its own.
 
     Two identities, strictly speaking, when impersonating: the token stays the
     caller's and the server resolves the borrowed one. Nothing here decides
     anything about permissions — the headers are a request, and the server
     refuses them unless a grant says otherwise.
+
+    A pool to itself is right for the CLI and the mount: one human, one
+    process, connections worth keeping warm for as long as it runs. It is
+    wrong for anything serving whoever is asking, where the identity changes
+    per request — see `ClientPool`, and pass its transport in here.
     """
 
     def __init__(self, base_url: str, token: str | None, *, timeout: float = 15.0,
                  act_as: str | None = None,
-                 act_as_groups: list[str] | None = None) -> None:
+                 act_as_groups: list[str] | None = None,
+                 transport: httpx.AsyncBaseTransport | None = None) -> None:
         headers = {"Accept": "application/json"}
         if token:
             headers["Authorization"] = f"Bearer {token}"
@@ -88,14 +94,27 @@ class Client:
         # both awkward and a way to print something subtly different from what
         # was asked for.
         self.base_url = base_url.rstrip("/")
+        # httpx keeps the connection pool in the transport, so a borrowed
+        # transport is a borrowed pool. Whether this instance owns one has to
+        # be remembered: AsyncClient.aclose() closes its transport
+        # unconditionally, and there is no flag on it that says otherwise.
+        self._owns_transport = transport is None
         self._http = httpx.AsyncClient(
             base_url=self.base_url,
             headers=headers,
             timeout=timeout,
+            transport=transport,
         )
 
     async def aclose(self) -> None:
-        await self._http.aclose()
+        """Done with this identity — and with the connections, if they are ours.
+
+        Closing a borrowed pool would take every other identity's live
+        connections down with it, which is a bug that appears only under
+        concurrency and looks like the server hanging up at random.
+        """
+        if self._owns_transport:
+            await self._http.aclose()
 
     # -- plumbing ----------------------------------------------------------
 
@@ -374,3 +393,40 @@ class Client:
             headers={"Prefer": "return=representation"},
         )
         return bool(self._rows(r))
+
+
+class ClientPool:
+    """Many identities, one set of connections.
+
+    A server renders pages for whoever is asking, so the token changes from
+    one request to the next and a `Client` per request would mean a fresh TCP
+    connection to PostgREST per page view — handshake and all, for a request
+    that is usually a single indexed SELECT.
+
+    What has to stay per-identity is the headers: the bearer token and the
+    impersonation headers are what make a request that caller's, and they are
+    the only reason this cannot simply be one shared `Client`. Everything
+    below them — sockets, keep-alive, DNS — is identity-agnostic, so it lives
+    here and the clients borrow it.
+
+    Nothing about permissions changes. Two callers sharing a socket still
+    arrive at PostgREST with their own tokens, and RLS sees exactly what it
+    saw before; connection reuse is beneath the layer that decides anything.
+    """
+
+    def __init__(self, *, limits: httpx.Limits | None = None) -> None:
+        self._transport = httpx.AsyncHTTPTransport(
+            limits=limits if limits is not None else httpx.Limits())
+
+    def client(self, base_url: str, token: str | None, **kwargs: Any) -> Client:
+        """A client for one identity, on the shared connections.
+
+        Cheap enough to build per request: it is a header dict and a wrapper.
+        Its `aclose()` is a no-op on the pool, so callers may close it as
+        usual without reaching anyone else's connections.
+        """
+        return Client(base_url, token, transport=self._transport, **kwargs)
+
+    async def aclose(self) -> None:
+        """Close the connections. The pool owns them; nobody else may."""
+        await self._transport.aclose()

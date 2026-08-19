@@ -14,7 +14,7 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from fswiki_core.client import Client, PostgrestError, Unreachable
+from fswiki_core.client import Client, ClientPool, PostgrestError, Unreachable
 
 pytestmark = pytest.mark.anyio
 
@@ -232,3 +232,80 @@ async def test_an_ungranted_impersonation_is_refused_by_the_server(stack, client
     frank = await client("frank", act_as=stack.who("bob"))
     with pytest.raises(PostgrestError):
         await frank.manifest()
+
+
+# --- the connection pool ---------------------------------------------------
+#
+# `Client` is one identity and, by default, connections of its own. A server
+# renders for whoever is asking, so the token changes per request and a client
+# per request would open a fresh connection to PostgREST for every page view.
+# `ClientPool` exists to separate the two: headers stay per-identity, sockets
+# are shared. The hazard the tests below pin down is the seam between them —
+# httpx.AsyncClient.aclose() closes its transport unconditionally, so a
+# borrower that closes normally would take everyone else's connections with it.
+
+
+class _CountingTransport(httpx.AsyncBaseTransport):
+    """A transport that answers nothing and remembers being closed."""
+
+    def __init__(self) -> None:
+        self.closes = 0
+        self.tokens: list[str | None] = []
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        self.tokens.append(request.headers.get("Authorization"))
+        return httpx.Response(200, json=[])
+
+    async def aclose(self) -> None:
+        self.closes += 1
+
+
+def test_a_pool_hands_every_identity_the_same_connections():
+    pool = ClientPool()
+    a = pool.client("http://example.invalid", "token-a")
+    b = pool.client("http://example.invalid", "token-b")
+    assert a._http._transport is b._http._transport
+
+
+async def test_closing_a_borrowed_client_leaves_the_pool_open():
+    """The whole point of the split. Under concurrency this bug looks like the
+    server hanging up at random, because it is one request's cleanup reaching
+    into every other request's sockets."""
+    shared = _CountingTransport()
+    c = Client("http://example.invalid", "a-token", transport=shared)
+    await c.whoami()
+    await c.aclose()
+    assert shared.closes == 0
+
+
+async def test_a_client_with_connections_of_its_own_still_closes_them():
+    """The other half: nothing above changes for the CLI or the mount, which
+    own their pool and must still release it when they stop."""
+    c = Client("http://example.invalid", "a-token")
+    await c.aclose()
+    assert c._http.is_closed
+
+
+async def test_identities_sharing_a_pool_do_not_share_a_token():
+    """Sockets are identity-agnostic; headers are the identity. If sharing a
+    pool ever leaked a token between clients, RLS would be answering the wrong
+    question with a completely straight face."""
+    shared = _CountingTransport()
+    a = Client("http://example.invalid", "token-a", transport=shared)
+    b = Client("http://example.invalid", "token-b", transport=shared)
+    await a.whoami()
+    await b.whoami()
+    await a.whoami()
+    assert shared.tokens == ["Bearer token-a", "Bearer token-b", "Bearer token-a"]
+
+
+async def test_two_people_on_one_pool_get_their_own_answers(stack):
+    """The same thing against a real PostgREST, because the header plumbing
+    that matters is the plumbing httpx actually sends."""
+    pool = ClientPool()
+    try:
+        bob = pool.client(stack.url, stack.token("bob"))
+        carol = pool.client(stack.url, stack.token("carol"))
+        assert await bob.whoami() != await carol.whoami()
+    finally:
+        await pool.aclose()
