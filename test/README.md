@@ -40,6 +40,32 @@ Without the namespace everything except the mount tests still runs:
 
 The mount tests are marked, and they are marked precisely so that this works.
 
+## In a build sandbox
+
+    nix build --file . tests.check -L
+
+97 tests, about eleven seconds, entirely inside a pure Nix build. That covers
+the render seam, the client, the SQL suite, the audit trail over HTTP and
+impersonation over HTTP.
+
+Two things were measured rather than assumed. **Loopback works**: the sandbox's
+`lo` is up with 127.0.0.1 and binds and connects fine, so Postgres and PostgREST
+need nothing special in there. PostgREST does support Unix sockets
+(`server-unix-socket`), but they would buy nothing — the network is not what is
+missing.
+
+**`/dev/fuse` is what is missing.** The sandbox's `/dev` holds null, zero,
+random, tty and little else, and no amount of unsharing conjures a device node
+that is not there. So the mount half cannot run in a build at all, and `-m 'not
+mount'` is exactly the line between the two. The mount fixture also skips itself
+when `/dev/fuse` is absent, so the marker is a convenience rather than the only
+thing standing between you and a wall of confusing failures.
+
+One environment fix worth knowing about: httpx builds a default SSL context even
+for an `http://` URL, so without `SSL_CERT_FILE` every test that uses the client
+dies with a bare `FileNotFoundError` out of `ssl.py`. The check derivation sets
+it.
+
 ## What is where
 
 | file | what it covers |

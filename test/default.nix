@@ -31,35 +31,67 @@ let
     ps.markdown-it-py
     ps.mistune
   ]);
-in
-pkgs.writeShellApplication {
-  name = "fswiki-test";
+  runner = pkgs.writeShellApplication {
+    name = "fswiki-test";
 
-  runtimeInputs = [
-    python
-    pkgs.postgresql_18
-    pkgs.postgrest
-    fswiki-cli
-    fswiki-fuse
-    # getfattr, for the xattrs the mount exposes.
-    pkgs.attr
-    # fusermount3 is setuid and must come from the system; see fuse/default.nix
-    # for why this is a suffix everywhere it appears.
-    pkgs.fuse3
-  ];
+    runtimeInputs = [
+      python
+      pkgs.postgresql_18
+      pkgs.postgrest
+      fswiki-cli
+      fswiki-fuse
+      # getfattr, for the xattrs the mount exposes.
+      pkgs.attr
+      # fusermount3 is setuid and must come from the system; see fuse/default.nix
+      # for why this is a suffix everywhere it appears.
+      pkgs.fuse3
+    ];
 
-  text = ''
-    root=''${FSWIKI_ROOT:-$PWD}
-    while [ ! -d "$root/server/sql" ] && [ "$root" != / ]; do
-      root=$(dirname "$root")
-    done
-    if [ ! -d "$root/server/sql" ]; then
-      echo "fswiki-test: not inside an fswiki checkout; set FSWIKI_ROOT" >&2
-      exit 1
-    fi
-    cd "$root"
-    exec pytest "$@"
+    text = ''
+      root=''${FSWIKI_ROOT:-$PWD}
+      while [ ! -d "$root/server/sql" ] && [ "$root" != / ]; do
+        root=$(dirname "$root")
+      done
+      if [ ! -d "$root/server/sql" ]; then
+        echo "fswiki-test: not inside an fswiki checkout; set FSWIKI_ROOT" >&2
+        exit 1
+      fi
+      cd "$root"
+      exec pytest "$@"
+    '';
+
+    meta.description = "Run the fswiki test suite against a throwaway stack";
+  };
+
+  # The half of the suite that runs in a build sandbox.
+  #
+  #   nix build --file . tests.check -L
+  #
+  # Measured in the sandbox rather than assumed: `lo` is up with 127.0.0.1 and
+  # binds and connects fine, so Postgres and PostgREST over loopback need
+  # nothing special -- Unix sockets would buy nothing here, though PostgREST
+  # does support them (server-unix-socket).
+  #
+  # What is genuinely absent is `/dev/fuse`. The sandbox's /dev has null, zero,
+  # random, tty and little else, and no amount of unsharing conjures a device
+  # node that is not there, so the mount tests cannot run in a build at all.
+  # `-m 'not mount'` is exactly the line between the two, and that is what the
+  # marker is for.
+  check = pkgs.runCommand "fswiki-check" {
+    nativeBuildInputs = [ runner ];
+    src = lib.cleanSource ../.;
+    # httpx builds a default SSL context even for an http:// URL, and looking
+    # for a CA bundle that is not there fails with a bare FileNotFoundError
+    # from ssl.py -- nothing to do with this suite, but it takes out every test
+    # that uses the client.
+    SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+  } ''
+    export FSWIKI_ROOT=$src
+    export HOME=$TMPDIR
+    fswiki-test -m 'not mount' -p no:cacheprovider
+    touch $out
   '';
-
-  meta.description = "Run the fswiki test suite against a throwaway stack";
-}
+in
+# The runner is the default -- `nix run --file . tests` -- with the sandboxed
+# build hanging off it as `tests.check`.
+runner // { inherit check; }

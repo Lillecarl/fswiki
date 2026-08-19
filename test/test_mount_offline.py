@@ -7,7 +7,16 @@ leaving a mountpoint that hangs every `ls` until someone unmounts it by hand.
 So the bar here is higher than "reports an error": nothing the network does may
 end the process.
 
-These use a PostgREST of their own, because the interesting move is killing it.
+There are two outages here and they are not the same one. Killing PostgREST
+means every request is a connection refused, which arrives as a transport error
+and never touches the response-handling code at all. Killing the *database*
+under a live PostgREST means every request gets an answer -- a 503, with a
+schema cache it cannot load -- which arrives through the ordinary error path
+with a status nothing has a branch for. A client can handle either one and drop
+the other.
+
+The first uses a PostgREST of its own, because the interesting move is killing
+it. The second stops the session's cluster and always brings it back.
 """
 
 from __future__ import annotations
@@ -136,3 +145,56 @@ def _writable(path, text: str) -> bool:
         return True
     except OSError:
         return False
+
+
+# ---------------------------------------------------------------------------
+# One layer down: PostgREST is up, the database is not
+#
+# A different failure from the one above, and clients meet the two through
+# completely different code paths. Here every request gets an answer -- 503,
+# with a schema cache PostgREST cannot load -- so nothing raises a transport
+# error and nothing is refused by the ACL either.
+# ---------------------------------------------------------------------------
+
+def test_the_mount_survives_the_database_going_away(mount, db_outage, clean):
+    """`ls` still works and the process is still there. A 503 is a
+    `PostgrestError` like any other, which is the point: the interesting risk
+    is a status nothing has a branch for arriving somewhere that assumed one."""
+    before = sorted(os.listdir(mount.path / "public"))
+    db_outage.stop()
+
+    assert sorted(os.listdir(mount.path / "public")) == before
+    assert alive(mount)
+
+
+def test_a_read_during_a_database_outage_is_an_io_error(mount, db_outage):
+    """Not EACCES. `_errno_for` maps 401 and 403 to "you may not" and
+    everything else to "it went wrong", and a database that is down must land
+    in the second: telling someone they lack permission when the truth is that
+    nothing is running sends them to an administrator about the wrong thing."""
+    (mount / "public/welcome.md").read_text()
+    db_outage.stop()
+
+    with pytest.raises(OSError) as exc:
+        (mount / "public/archive/old-post.md").read_text()
+    assert exc.value.errno == errno.EIO
+
+
+def test_the_mount_recovers_when_the_database_comes_back(mount, db_outage, clean):
+    db_outage.stop()
+    with pytest.raises(OSError):
+        (mount / "public/archive/old-post.md").read_text()
+
+    db_outage.start()
+    assert wait_for(lambda: _readable(mount / "public/archive/old-post.md"),
+                    timeout=60, what="the mount to serve again")
+
+
+def test_the_cli_reports_a_database_outage_as_a_sentence(cli, db_outage):
+    """503 arrives with a body PostgREST wrote, not a JSON error object of the
+    shape the client expects. Reading a message out of it must not be what
+    turns an outage into a traceback."""
+    db_outage.stop()
+    r = cli("status")
+    assert r.code == 1
+    assert "Traceback" not in r

@@ -20,6 +20,7 @@ import hmac
 import json
 import os
 import shutil
+import signal
 import socket
 import subprocess
 import tempfile
@@ -28,6 +29,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -349,6 +351,63 @@ class Spare:
 
 
 @pytest.fixture
+def db_outage(stack):
+    """Stop the *cluster*, and always bring it back before the next test.
+
+    A layer below `spare`. There the socket is gone and every request is a
+    connection refused; here PostgREST is still listening and still answering —
+    with 503s and a schema cache it cannot load. Clients meet those two through
+    completely different code paths, and one of them is easy to forget.
+
+    The session's own cluster, because a second one would mean a second initdb
+    and a second schema load for one module's worth of tests. The contract is
+    the `finally`: whatever the test does, the stack is serving queries again
+    before the fixture returns.
+    """
+    stopped = False
+
+    def stop():
+        nonlocal stopped
+        _as_postgres(["pg_ctl", "-D", str(stack.datadir), "stop", "-m", "fast"],
+                     check=True, capture_output=True)
+        stopped = True
+
+    def start():
+        nonlocal stopped
+        if not stopped:
+            return
+        _as_postgres(
+            ["pg_ctl", "-D", str(stack.datadir),
+             "-l", str(stack.datadir.parent / "postgres.log"),
+             "-o", f"-h 127.0.0.1 -p {stack.pg_port} -k '' "
+                   f"-c log_min_messages=warning", "start", "-w"],
+            check=True, capture_output=True)
+        stopped = False
+        # PostgREST backs off between reconnection attempts, and waiting that
+        # out would put tens of seconds into the suite for nothing. SIGUSR1 is
+        # its "reload the schema cache" signal, which reconnects first.
+        for proc in stack.procs:
+            if proc.poll() is None:
+                proc.send_signal(signal.SIGUSR1)
+        wait_for(lambda: _serving(stack), timeout=60,
+                 what="postgrest to recover from the outage")
+
+    outage = SimpleNamespace(stop=stop, start=start)
+    try:
+        yield outage
+    finally:
+        start()
+
+
+def _serving(stack: Stack) -> bool:
+    try:
+        return http(stack.url + "/syncable_document?select=id&limit=1",
+                    token=stack.token("bob"), timeout=2).code == 200
+    except urllib.error.URLError:
+        return False
+
+
+@pytest.fixture
 def spare(stack, tmp_path):
     """A second PostgREST on the same database, for tests that kill one."""
     port = free_port()
@@ -494,6 +553,12 @@ def mount_factory(stack, tmp_path_factory):
     is already dead.
     """
     _require("fswiki-mount", "fusermount3")
+    if not os.path.exists("/dev/fuse"):
+        # A build sandbox has null, zero, random, tty and little else in /dev,
+        # and no amount of unsharing conjures a device node that is not there.
+        # Skipping says that; the alternative is every mount test failing with
+        # whatever libfuse says about an open() it could not make.
+        pytest.skip("no /dev/fuse; mount tests need one", allow_module_level=True)
     live: list[Mount] = []
 
     def start(*flags: str, user: str = "bob", poll: float = 1.0) -> Mount:
