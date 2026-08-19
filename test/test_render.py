@@ -176,3 +176,59 @@ def test_from_display_refuses_what_the_wiki_cannot_hold(bad):
 ])
 def test_from_display_is_lenient_about_separators(lenient, expect):
     assert naming.from_display(lenient) == expect
+
+
+# --- the configuration is part of the identity ------------------------------
+#
+# `version` is the *library's* version, so turning a plugin on or off changes
+# what a backend emits while leaving the version alone. A cache keyed on the
+# version alone would go on serving what the old configuration produced, and
+# nobody would notice, because the output is plausible -- just not what the
+# running code makes. That is what the config digest is for.
+
+def test_the_renderer_id_carries_the_backend_configuration(backend):
+    page = render.render("x", backend=backend)
+    options = getattr(registry.get(name=backend), "options", None)
+    if options:
+        assert f"+cfg{registry.config_digest(registry.get(name=backend))}" in page.renderer
+    else:
+        assert "+cfg" not in page.renderer
+
+
+def test_changing_an_option_changes_the_id():
+    """The property the digest exists for, asserted directly rather than
+    through a backend nobody will edit twice."""
+    class Fake:
+        name, version, content_types = "fake", "1.0", ("text/x-fake",)
+        options = {"plugins": ["table"]}
+        def to_html(self, text): return "<p>x</p>"
+
+    before = registry.config_digest(Fake())
+    Fake.options = {"plugins": ["table", "strikethrough"]}
+    assert registry.config_digest(Fake()) != before
+
+
+def test_a_backend_with_no_options_has_no_config_segment():
+    """`plain` has nothing to configure, and an empty digest would be noise in
+    every id forever."""
+    assert "+cfg" not in render.render("x", content_type="text/plain").renderer
+
+
+def test_the_digest_does_not_move_on_key_order():
+    """Canonical JSON, so that rewriting a dict literal is not a cache flush."""
+    class A:
+        name, version, content_types = "a", "1", ()
+        options = {"b": 2, "a": 1}
+    class B:
+        name, version, content_types = "b", "1", ()
+        options = {"a": 1, "b": 2}
+    assert registry.config_digest(A()) == registry.config_digest(B())
+
+
+def test_both_markdown_engines_agree_about_strikethrough():
+    """Having two engines is only worth it if a disagreement is visible. This
+    one was: markdown-it shipped without the plugin while mistune had it, so
+    `~~struck~~` rendered struck under one and as literal tildes under the
+    other."""
+    for name in MARKDOWN:
+        assert "<del>" in r("~~struck~~", name) or "<s>" in r("~~struck~~", name), name

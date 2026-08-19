@@ -33,6 +33,7 @@ from .registry import (
     Backend,
     UnknownBackend,
     available,
+    config_digest,
     get,
     register,
 )
@@ -69,6 +70,19 @@ def render(text: str, *, content_type: str = "text/markdown",
     html = safety.clean(chosen.to_html(links.expand(text)))
     return Rendered(
         html=html,
-        renderer=f"{chosen.name}/{chosen.version}+fswiki{PIPELINE_VERSION}",
+        renderer=_renderer_id(chosen),
         content_type=content_type,
     )
+
+
+def _renderer_id(backend) -> str:
+    """What produced this HTML, precisely enough to key a cache on.
+
+    Three parts, because there are three things that can change the bytes: the
+    engine, how it was configured, and the passes on either side of it. Leave
+    any of them out and switching or reconfiguring quietly serves output the
+    running code would not produce.
+    """
+    digest = config_digest(backend)
+    config = f"+cfg{digest}" if digest else ""
+    return f"{backend.name}/{backend.version}{config}+fswiki{PIPELINE_VERSION}"

@@ -33,14 +33,22 @@ class MarkdownItBackend:
 
     name = "markdown-it-py"
     content_types = MARKDOWN
+    # Everything that changes the output, declared so the cache key moves with
+    # it. `strikethrough` is enabled to match mistune: the two markdown engines
+    # disagreeing about `~~struck~~` is exactly the kind of thing having two of
+    # them is supposed to surface.
+    options = {"preset": "commonmark", "html": False,
+               "enable": ["table", "strikethrough"]}
 
     def __init__(self) -> None:
         import markdown_it
 
         self.version = markdown_it.__version__
         # html=False is the first of the two layers described in safety.py.
-        self._md = markdown_it.MarkdownIt("commonmark", {"html": False})
-        self._md.enable("table")
+        self._md = markdown_it.MarkdownIt(
+            self.options["preset"], {"html": self.options["html"]})
+        for extension in self.options["enable"]:
+            self._md.enable(extension)
 
     def to_html(self, text: str) -> str:
         return self._md.render(text)
@@ -55,13 +63,13 @@ class MistuneBackend:
 
     name = "mistune"
     content_types = MARKDOWN
+    options = {"escape": True, "plugins": ["table", "strikethrough"]}
 
     def __init__(self) -> None:
         import mistune
 
         self.version = mistune.__version__
-        self._md = mistune.create_markdown(
-            escape=True, plugins=["table", "strikethrough"])
+        self._md = mistune.create_markdown(**self.options)
 
     def to_html(self, text: str) -> str:
         return self._md(text)
@@ -101,7 +109,9 @@ class RstBackend:
     name = "docutils"
     content_types = ("text/x-rst",)
 
-    _SETTINGS = {
+    # The settings *are* the options: three of them are security, and all of
+    # them change the output, so they are what the cache key is digested from.
+    options = {
         # See the docstring. These three are security, not taste.
         "file_insertion_enabled": False,
         "raw_enabled": False,
@@ -127,7 +137,7 @@ class RstBackend:
         # `writer=` and not `writer_name=`: the latter is pending removal in
         # docutils 2.0 and warns on every call.
         return self._publish(
-            text, writer="html5", settings_overrides=self._SETTINGS
+            text, writer="html5", settings_overrides=self.options
         )["html_body"]
 
 
@@ -142,6 +152,8 @@ class PlainTextBackend:
     name = "plain"
     version = "1"
     content_types = ("text/plain",)
+    #: Nothing to configure, so nothing to digest: its id stays `plain/1+fswikiN`.
+    options: dict = {}
 
     def to_html(self, text: str) -> str:
         from html import escape

@@ -17,6 +17,8 @@ anywhere else.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from typing import Protocol, runtime_checkable
 
@@ -24,9 +26,14 @@ from typing import Protocol, runtime_checkable
 # renderer id and therefore in the cache key, because a cached body is only
 # reusable if the whole pipeline that produced it is the same — the backend
 # alone does not identify the output.
-# 2: the sanitiser began allowing <section> and <aside>, so the same backend
-# on the same input now emits different bytes than it did at 1.
-PIPELINE_VERSION = 2
+# What the passes on either side of the backend emit, versioned. It travels in
+# the renderer id and therefore in the cache key, because a cached body is only
+# reusable if the whole pipeline that produced it is the same.
+#
+#   2: the sanitiser began allowing <section> and <aside>, for docutils.
+#   3: and <s>, which markdown-it emits for `~~struck~~` and which was being
+#      unwrapped -- the text rendered, unstruck, with nothing to indicate it.
+PIPELINE_VERSION = 3
 
 
 @runtime_checkable
@@ -40,6 +47,16 @@ class Backend(Protocol):
     version: str
     #: The content types this backend claims.
     content_types: tuple[str, ...]
+    #: Every option that changes what `to_html` emits, as plain data.
+    #:
+    #: Digested into the renderer id, and therefore into the cache key. The
+    #: point is that it cannot be forgotten: `version` is the *library's*, so
+    #: turning a plugin on or off changes the output while leaving the version
+    #: alone -- and a cache keyed on the version alone would go on serving what
+    #: the old configuration produced. Declaring the options rather than a
+    #: hand-written token means the key moves whether or not anyone remembers
+    #: that it should.
+    options: dict
 
     def to_html(self, text: str) -> str:
         """Convert `text`. Must not emit raw HTML from the source.
@@ -56,6 +73,20 @@ class UnknownBackend(LookupError):
 
 _by_name: dict[str, Backend] = {}
 _by_type: dict[str, list[Backend]] = {}
+
+
+def config_digest(backend: Backend) -> str:
+    """A short stable fingerprint of a backend's options, or "" if it has none.
+
+    Canonical JSON so that key order and whitespace cannot move it, truncated
+    because this is a cache key rather than a signature: eight hex characters
+    is 4 billion configurations, against the handful any deployment has.
+    """
+    options = getattr(backend, "options", None)
+    if not options:
+        return ""
+    canonical = json.dumps(options, sort_keys=True, default=repr).encode()
+    return hashlib.sha256(canonical).hexdigest()[:8]
 
 
 def register(backend: Backend) -> Backend:

@@ -20,7 +20,11 @@ from __future__ import annotations
 # Enough for prose. Anything not listed is dropped rather than escaped, so a
 # stray tag disappears instead of being shown to the reader as source.
 TAGS = {
-    "p", "br", "hr", "em", "strong", "del", "ins", "sub", "sup", "code", "pre",
+    # `s` beside `del`, because the two markdown engines disagree about which
+    # one `~~struck~~` is: markdown-it emits <s>, mistune emits <del>. Without
+    # it the tag is unwrapped and the text renders unstruck -- silently, which
+    # is the failure mode an allowlist has and a blocklist does not.
+    "p", "br", "hr", "em", "strong", "del", "ins", "s", "sub", "sup", "code", "pre",
     "blockquote", "h1", "h2", "h3", "h4", "h5", "h6",
     "ul", "ol", "li", "dl", "dt", "dd",
     "table", "thead", "tbody", "tfoot", "tr", "th", "td",
