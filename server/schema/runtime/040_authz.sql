@@ -219,7 +219,20 @@ $$;
 -- Does an ACE carrying this role speak to this capability at all? The closure
 -- direction depends on whether the ACE grants or removes access — see the
 -- comment on wiki.capability_requires.
-create or replace function wiki.ace_covers(
+--
+-- **This is the definition and not the answer.** It walks two recursive CTEs
+-- per call, which cost 0.089 ms, and wiki.resolve_ace() calls it once per
+-- candidate ACE per document -- about fourteen times each on the fixtures.
+-- That was 1.1 ms of the 1.19 ms wiki.can() cost, which was the whole of a
+-- page: 58.9 ms of a 168 ms page render, growing with the number of documents
+-- the reader can see. See issue #10.
+--
+-- So this is now what *builds* wiki.ace_closure, in seed/950_ace_closure.sql,
+-- and wiki.ace_covers() below reads the table. Keeping the recursive form as a
+-- named function rather than inlining it into the seed file is deliberate:
+-- it is the specification the closure is tested against, over the full cross
+-- product, in server/test/080_closure_test.sql.
+create or replace function wiki.ace_covers_uncached(
   p_role uuid,
   p_cap  wiki.capability,
   p_type wiki.ace_type
@@ -236,6 +249,99 @@ set search_path = wiki, public, pg_temp as $$
              else              p_cap in (select c.capability
                                            from wiki.capability_upward(rc.capability) c)
            end
+  );
+$$;
+
+-- Rebuild the closure from the recursive definition above.
+--
+-- Called from seed/950_ace_closure.sql, and from a trigger on each of the four
+-- tables it is derived from. Both, and neither is redundant:
+--
+--   the seed call is what a migration does, and it is what fills the table on
+--   a database that had roles before this existed;
+--
+--   the triggers are what keep it true *between* migrations. That is not
+--   theoretical. server/test/010_fixtures.sql creates a `retirer` role after
+--   the seed has run, and with the seed call alone the closure held nothing
+--   for it -- so frank silently lost the `delete` he had been granted, and the
+--   merge tests three files later failed with an error that named neither.
+--
+-- Whole-table rebuild rather than an incremental update, because the four
+-- source tables hold 22 rows between them and the closure is 75. Working out
+-- which rows a change touches would be more code than the code it replaced,
+-- and it would be the code with the security failure mode.
+create or replace function wiki.rebuild_ace_closure()
+returns void
+language sql security definer
+set search_path = wiki, public, pg_temp as $$
+  with fresh as (
+    select r.id as role_id, c.capability, t.ace_type
+      from wiki.role r
+      cross join (select unnest(enum_range(null::wiki.capability)) as capability) c
+      cross join (select unnest(enum_range(null::wiki.ace_type))   as ace_type) t
+     where wiki.ace_covers_uncached(r.id, c.capability, t.ace_type)
+  ),
+  gone as (
+    delete from wiki.ace_closure x
+     where not exists (select 1 from fresh f
+                        where f.role_id = x.role_id
+                          and f.capability = x.capability
+                          and f.ace_type = x.ace_type)
+  )
+  insert into wiki.ace_closure (role_id, capability, ace_type)
+  select f.role_id, f.capability, f.ace_type from fresh f
+      on conflict (role_id, capability, ace_type) do nothing;
+$$;
+
+create or replace function wiki.ace_closure_stale()
+returns trigger
+language plpgsql security definer
+set search_path = wiki, public, pg_temp as $$
+begin
+  perform wiki.rebuild_ace_closure();
+  return null;
+end;
+$$;
+
+-- Statement-level, on every way the inputs can move. `truncate` is in the list
+-- because it is the one that does not fire a row-level trigger and is
+-- therefore the one that would be missed.
+create trigger role_closure_stale
+  after insert or update or delete or truncate on wiki.role
+  for each statement execute function wiki.ace_closure_stale();
+
+create trigger role_capability_closure_stale
+  after insert or update or delete or truncate on wiki.role_capability
+  for each statement execute function wiki.ace_closure_stale();
+
+create trigger role_inherits_closure_stale
+  after insert or update or delete or truncate on wiki.role_inherits
+  for each statement execute function wiki.ace_closure_stale();
+
+create trigger capability_requires_closure_stale
+  after insert or update or delete or truncate on wiki.capability_requires
+  for each statement execute function wiki.ace_closure_stale();
+
+-- The same answer, as one index lookup. Measured: 0.006 ms against 0.089 ms,
+-- and a page's two reads fall from 58.9 ms to 14.2 ms.
+--
+-- security definer, so it reads wiki.ace_closure as the owner and no client
+-- role needs select on it. That keeps the anonymous allow-list in
+-- server/test/070_public_test.sql exactly as it was.
+create or replace function wiki.ace_covers(
+  p_role uuid,
+  p_cap  wiki.capability,
+  p_type wiki.ace_type
+)
+returns boolean
+language sql stable security definer parallel safe
+set search_path = wiki, public, pg_temp as $$
+  select exists (
+    select 1
+      from wiki.ace_closure x
+     where x.role_id = p_role
+       and x.capability = p_cap
+       and x.ace_type = p_type
   );
 $$;
 

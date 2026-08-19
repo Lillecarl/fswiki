@@ -327,25 +327,31 @@ it covers — and **that step is six per cent of the page**. The two reads are
 167 ms of the 168. Switching the cache off and on again moves the end-to-end
 number by less than the noise.
 
-The 167 ms is not transport. PostgREST answers a read of a small RLS'd table in
-**1.3 ms**, and the query shape it generates is within the noise of a plain
-`select`. The cost is inside the database, and it is `wiki.can()`:
+The 167 ms was not transport. PostgREST answers a read of a small RLS'd table
+in **1.3 ms**, and the query shape it generates is within the noise of a plain
+`select`. The cost was inside the database, in `wiki.ace_covers()` — two
+recursive CTEs over 22 rows of role and capability tables, run about fourteen
+times per document, on every document, on every request.
 
-| | median |
-| --- | --- |
-| `wiki.can()` on 1 document | 4.65 ms |
-| on 5 | 13.27 ms |
-| on 19 | 46.06 ms |
-| `wiki.capabilities_at()` on 19 | 206 ms |
+That closure is 75 rows. It is now a table, rebuilt by
+`seed/950_ace_closure.sql` and by a trigger on each of the four tables it is
+derived from. Measured over HTTP, same stack, same 19 documents:
 
-Linear, at about **2.3 ms per document**, and `document_select` calls it once
-per row. Every read of the tree pays it for every document the reader can see.
-That is why `outline()` exists and why `capabilities_at()` is pruned out of it —
-and it is also why the outline still costs 89.5 ms for nineteen documents.
+| | before | after | |
+| --- | --- | --- | --- |
+| the outline read | 41.3 ms | **11.1 ms** | 3.7× |
+| one document read | 30.9 ms | **9.5 ms** | 3.2× |
+| the full manifest, with capabilities | 410 ms | **91.2 ms** | 4.5× |
+| a small RLS'd table, for the floor | 1.29 ms | 1.55 ms | — |
 
-So: **the render was never the problem, and neither is the transport.** The next
-real win is the ACL walk, which is O(documents visible) with a 2.3 ms constant.
-See issue #10.
+So a page's two reads went from ~168 ms to ~21 ms, and rendering — 0.12 ms for
+a small page, 9.90 ms for a long one — stopped being a rounding error. The
+cache earns its keep at the long end now.
+
+What did not change is the shape: `wiki.can()` is still called once per
+document by `document_select`, so a read of the tree is still O(documents
+visible). The constant is about twelve times smaller. Issue #10 has the profile
+and what is still open.
 
 The cache stays regardless. It is correct, it is 60 lines, it costs nothing at
 a hit, and it stops being invisible the moment syntax highlighting lands (#9),

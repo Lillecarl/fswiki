@@ -1,0 +1,26 @@
+-- Fill the role/capability closure.
+--
+-- **950 and not 900.** seed/ loads in name order, and `900_ace_closure` sorts
+-- before `900_builtin_roles` -- so on a fresh database the closure was built
+-- from an empty wiki.role and came out empty. An empty closure is not a slow
+-- wiki, it is a wiki where nobody may read anything, and the SQL suite failed
+-- three files later with "no such document" rather than anywhere near here.
+-- This has to be the last file in the track.
+--
+-- The rows, not the relation: wiki.ace_closure is defined in
+-- tables/110_ace_closure.sql, which is where the argument for materialising it
+-- at all is written down. This file is what makes a migration the moment it
+-- can go stale, and therefore the moment it cannot.
+--
+-- One call, because the rebuild has to exist as a function anyway: the
+-- triggers in runtime/040_authz.sql call the same one, and a second copy of
+-- the query here is a second thing to get wrong.
+--
+-- Inside the migration transaction like everything else, so no reader ever
+-- sees an empty closure. An empty closure is not a slow wiki, it is a wiki
+-- where nobody may read anything.
+--
+-- Not redundant with the triggers. The triggers keep it true when the inputs
+-- move; this is what fills it on a database whose roles were inserted before
+-- any of this existed, and it is the belt to their braces on every deploy.
+select wiki.rebuild_ace_closure();
