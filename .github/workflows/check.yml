@@ -4,15 +4,32 @@ on:
   push:
   pull_request:
 
+# A second push supersedes the first. Nothing here is a deploy, so there is
+# nothing a cancelled run leaves half-done.
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  # The sandboxable half of the suite: render, client, SQL, audit and
-  # impersonation over HTTP. 97 tests in about eleven seconds, and it needs
-  # nothing of the runner but a working Nix -- Postgres and PostgREST come up
-  # on loopback inside the build sandbox, which is where they were measured.
+  # The sandboxable half of the suite: render, client, the audit queue, SQL,
+  # and the audit trail and impersonation over HTTP. 121 tests in about fifteen
+  # seconds, and it needs nothing of the runner but a working Nix -- Postgres
+  # and PostgREST come up on loopback inside the build sandbox, which is where
+  # that was measured.
+  #
+  # No cachix. There is one (`lillecarl`), and nanopynix uses it because it
+  # compiles Nix itself; here the 248 MiB is nixpkgs closure that cache.nixos.org
+  # already holds, and the only things built locally are five small derivations
+  # measured in seconds. Wiring a token in would buy nothing worth the secret.
   #
   # The mount half cannot run in here at all -- see the `mount` job below.
   check:
-    runs-on: ubuntu-latest
+    # Pinned rather than ubuntu-latest: `latest` moves under you, and a suite
+    # that starts failing because the image rolled is a morning spent looking
+    # in the wrong place.
+    runs-on: ubuntu-24.04
+    # The sandboxed half is fifteen seconds. Anything near this is hung.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
 
@@ -43,7 +60,11 @@ jobs:
   # uid 0 it drops initdb and pg_ctl to uid 1000. That is the same code path the
   # workstation invocation exercises, for the same reason.
   mount:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    # A cap matters more here than anywhere else: a wedged FUSE mount does not
+    # crash, it blocks, and every `ls` after it blocks too. Without this the
+    # default is six hours of a runner sitting on a hung syscall.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
 
