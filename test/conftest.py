@@ -256,7 +256,7 @@ def stack():
         subprocess.run(["createdb", "-h", "127.0.0.1", "-p", str(pg_port),
                         "-U", "postgres", "fswiki"], check=True, capture_output=True)
 
-        for sql in sorted((ROOT / "server" / "sql").glob("*.sql")):
+        for sql in sorted((ROOT / "server" / "schema").glob("*.sql")):
             _load(pg_port, sql)
         # The same fixtures the SQL suite asserts against, so a number measured
         # in one suite means the same thing in the other.

@@ -96,10 +96,10 @@ let
       fi
 
       root=''${FSWIKI_ROOT:-$PWD}
-      while [ ! -d "$root/server/sql" ] && [ "$root" != / ]; do
+      while [ ! -d "$root/server/schema" ] && [ "$root" != / ]; do
         root=$(dirname "$root")
       done
-      if [ ! -d "$root/server/sql" ]; then
+      if [ ! -d "$root/server/schema" ]; then
         echo "fswiki-test: not inside an fswiki checkout; set FSWIKI_ROOT" >&2
         exit 1
       fi

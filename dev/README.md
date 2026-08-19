@@ -23,7 +23,7 @@ Override with `FSWIKI_HTTP_PORT`, `FSWIKI_PG_PORT`, `FSWIKI_PC_PORT`,
     init  ->  postgres  ->  schema  ->  postgrest
 
 `init` runs `initdb` and mints a JWT secret. `schema` creates the database and
-loads `server/sql/*.sql`, then the test fixtures and `dev/seed.sql` — but only
+loads `server/schema/*.sql`, then the test fixtures and `dev/seed.sql` — but only
 when the database is absent, since the DDL is not idempotent. `reset` is how you
 reload it.
 

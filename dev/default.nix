@@ -81,7 +81,7 @@ let
           echo "==> creating database fswiki"
           createdb fswiki
 
-          for f in "$FSWIKI_ROOT"/server/sql/*.sql; do
+          for f in "$FSWIKI_ROOT"/server/schema/*.sql; do
             echo "    $(basename "$f")"
             psql -q -d fswiki -v ON_ERROR_STOP=1 -X -f "$f"
           done
@@ -108,7 +108,7 @@ let
           export PGRST_SERVER_PORT="$FSWIKI_HTTP_PORT"
           export PGRST_DB_POOL=4
           # Runs inside every request's transaction, before anything else, and
-          # is the only door into impersonation. See server/sql/100_impersonation.sql.
+          # is the only door into impersonation. See server/schema/100_impersonation.sql.
           export PGRST_DB_PRE_REQUEST=wiki.pre_request
           export PGRST_OPENAPI_MODE=follow-privileges
           exec postgrest
@@ -141,13 +141,13 @@ let
       ${lib.concatStringsSep "\n" (lib.mapAttrsToList
         (k: v: ''export ${k}="''${${k}:-${v}}"'') defaults)}
 
-      # Repo root: the directory holding server/sql. Resolved from $PWD upward so
+      # Repo root: the directory holding server/schema. Resolved from $PWD upward so
       # the command works from anywhere inside the checkout.
       if [ -z "''${FSWIKI_ROOT:-}" ]; then
         d=$PWD
-        while [ "$d" != "/" ] && [ ! -d "$d/server/sql" ]; do d=$(dirname "$d"); done
-        if [ ! -d "$d/server/sql" ]; then
-          echo "fswiki-dev: not inside an fswiki checkout (no server/sql above $PWD)" >&2
+        while [ "$d" != "/" ] && [ ! -d "$d/server/schema" ]; do d=$(dirname "$d"); done
+        if [ ! -d "$d/server/schema" ]; then
+          echo "fswiki-dev: not inside an fswiki checkout (no server/schema above $PWD)" >&2
           echo "            set FSWIKI_ROOT to point at it" >&2
           exit 1
         fi

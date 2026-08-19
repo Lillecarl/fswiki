@@ -39,7 +39,7 @@ def sql_results(stack):
     subprocess.run(["createdb", "-h", "127.0.0.1", "-p", str(stack.pg_port),
                     "-U", "postgres", SQL_DB], check=True, capture_output=True)
 
-    for path in sorted((ROOT / "server" / "sql").glob("*.sql")):
+    for path in sorted((ROOT / "server" / "schema").glob("*.sql")):
         _load(stack.pg_port, path, db=SQL_DB)
     for path in sorted((ROOT / "server" / "test").glob("0*.sql")):
         _load(stack.pg_port, path, db=SQL_DB)

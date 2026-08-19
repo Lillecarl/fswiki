@@ -3,7 +3,7 @@
 Letting a maintainer ask "what does Bob actually see?" and get the true answer,
 rather than a reconstruction of it.
 
-Built, in [100_impersonation.sql](../server/sql/100_impersonation.sql). Every
+Built, in [100_impersonation.sql](../server/schema/100_impersonation.sql). Every
 number below is measured: 39 assertions in
 [060_impersonation_test.sql](../server/test/060_impersonation_test.sql), and 21
 more against a live PostgREST, because the finding that decides the whole shape
@@ -484,7 +484,7 @@ Measured: after an impersonated read, `access_event` is empty and
 
 ## What this closes
 
-[950_lockdown.sql](../server/sql/950_lockdown.sql) records a known residual: an
+[950_lockdown.sql](../server/schema/950_lockdown.sql) records a known residual: an
 authenticated caller can pass an explicit `p_user` to `wiki.can()`,
 `wiki.capabilities_at()` and friends and learn another principal's capabilities
 on a document whose uuid they know. The file says closing it properly is worth

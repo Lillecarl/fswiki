@@ -32,7 +32,7 @@ psql() { command psql -h 127.0.0.1 -p "$port" -U postgres -v ON_ERROR_STOP=1 -X 
 psql -q -c 'create database fswiki'
 
 echo "==> loading schema"
-for f in "$root"/sql/*.sql; do
+for f in "$root"/schema/*.sql; do
   echo "    $(basename "$f")"
   psql -q -d fswiki -f "$f"
 done
