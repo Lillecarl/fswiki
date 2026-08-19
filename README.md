@@ -102,6 +102,19 @@ built to have interesting shapes rather than tidy ones. `fswiki-dev token bob`
 signs a JWT with a local secret in exactly the form `wiki.current_user_id()`
 resolves — no OIDC provider needed until there is one.
 
+To read the wiki in a browser without running any client at all:
+
+```console
+$ export FSWIKI_DATABASE_URL=postgres://you@127.0.0.1:55432/fswiki
+$ nix run --file . server
+```
+
+It loads the schema if the database is empty, starts a PostgREST of its own,
+and serves. There is no login yet: a token goes in a `fswiki_session` cookie or
+an `Authorization` header, and a visitor without one sees whatever has been
+granted to the built-in `public` group — which is nothing until somebody grants
+it something.
+
 There is a browser view too, for while you are writing:
 
 ```console

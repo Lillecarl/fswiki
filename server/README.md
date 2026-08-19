@@ -1,13 +1,65 @@
-# fswiki server schema
+# fswiki server
 
-Postgres schema for the wiki: documents, versions, drafts, and an NTFS-style
-ACL enforced by row-level security.
+Two things share this directory, and they are closer than they look.
 
-    ./test/run.sh          # spins up a throwaway cluster, loads everything, runs the tests
+`schema/` is the Postgres schema: documents, versions, drafts, and an
+NTFS-style ACL enforced by row-level security. It is most of the product, and
+the rest of this file is about it.
+
+`fswiki_server/` is a small Python program that reads the wiki to a browser,
+for people who are not running a client. It holds no identity of its own — a
+visitor's token goes through to PostgREST unexamined — and it loads the schema
+above on startup, which is why the two live together.
+
+    ./test/run.sh          # a throwaway cluster, the schema, and the SQL tests
     PGBIN=/nix/store/...-postgresql-18.4/bin ./test/run.sh
 
 Requires PostgreSQL 16 or newer — ltree labels only accept hyphens and non-ASCII
 from 16 on, and slugs depend on that.
+
+## The server
+
+    $ export FSWIKI_DATABASE_URL=postgres://you@localhost:5432/fswiki
+    $ nix run --file .. server
+
+Three phases, in that order, and the order is the program:
+
+1. **migrate** — load the schema if it is absent, holding a session-level
+   advisory lock so that two servers starting at once wait rather than race.
+   There is no migration chain yet: this gets an empty database to the current
+   schema and does nothing to a database that already has one.
+2. **start PostgREST** — as a child process, and it does not return until
+   PostgREST answers. It is a child because PostgREST builds its schema cache
+   on connect and never notices DDL, so whatever changes the schema has to be
+   able to signal it. That signal is **SIGUSR1**; SIGUSR2 reloads the config
+   and silently does nothing useful here.
+3. **serve** — uvicorn over an ASGI application of about eighty statements.
+
+PostgREST binds an address of its own and is not proxied: the CLI and the FUSE
+mount talk to it directly. This program only owns its lifetime.
+
+| variable | |
+| --- | --- |
+| `FSWIKI_DATABASE_URL` | required; needs DDL rights, for the migrate phase |
+| `FSWIKI_POSTGREST_DATABASE_URL` | what PostgREST connects as. Should be `fswiki_authenticator` — an owner is not subject to RLS, so a PostgREST connected as the tables' owner bypasses every policy while looking healthy |
+| `FSWIKI_SCHEMA_DIR` | where the `.sql` files are; the package ships them |
+| `FSWIKI_HOST`, `FSWIKI_PORT` | this server |
+| `FSWIKI_POSTGREST_HOST`, `FSWIKI_POSTGREST_PORT`, `FSWIKI_POSTGREST_BIN` | that one |
+| `FSWIKI_JWT_SECRET` | passed to PostgREST, which is what verifies tokens |
+
+**There is no login yet.** A visitor's token is read from a `fswiki_session`
+cookie or an `Authorization: Bearer` header and passed through; without one
+they are anonymous and see whatever is granted to `public`. Real login means
+OIDC, and the schema has been ready for it since `user_account` gained
+`(oidc_issuer, oidc_subject)`.
+
+The pages themselves are `fswiki_core.pages`, shared with `fswiki preview` so
+that the two show the same wiki. What differs is what each is handed: the
+preview renders your drafts and reloads itself, the server renders published
+revisions and does not.
+
+It reads through `current_document`, not `syncable_document`. That is the
+`sync` capability working as documented — see [Sync](#sync) below.
 
 ## Load order
 
