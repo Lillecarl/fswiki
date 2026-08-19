@@ -186,9 +186,41 @@ library imports, so a build without them still gives a working client, and
 `fswiki render --list-backends` says what this installation actually has:
 
     $ fswiki render --list-backends
+      docutils         0.23       text/x-rst
       markdown-it-py   4.2.0      text/markdown
       mistune          3.3.3      text/markdown
       plain            1          text/plain
+
+### reStructuredText costs more than markdown, and one setting more than that
+
+docutils renders a 536 B page in **5.14 ms**, against 0.62 ms for markdown-it
+on a comparable one — about eight times the price, which is a few per cent of a
+request that already spends ~70 ms talking to PostgREST. That is the whole of
+the performance story and it is not interesting.
+
+The interesting part is that **docutils is unsafe by default for this use**,
+and two of the three settings that fix it were measured rather than reasoned
+about:
+
+- `.. include:: /any/path` opens that file and puts its contents in the page.
+  Arbitrary server-file disclosure, written by one user and read by another —
+  and **the sanitiser does not catch it**, because the contents arrive as text
+  nodes rather than as tags. `file_insertion_enabled=False`.
+- `.. raw:: html` injects markup. nh3 does strip the `<script>` it produces, so
+  this one is a layer rather than the wall. `raw_enabled=False`.
+- A **`docutils.conf` in the working directory overrides `settings_overrides`**,
+  so the two above can be set and mean nothing. This is the one nobody would
+  guess. `_disable_config=True`.
+
+All three are asserted in `test/test_render_rst.py`, including a test that the
+sanitiser would *not* have saved us — so that nobody later decides the parser
+setting is redundant because "nh3 handles it".
+
+The sanitiser gained `<section>` and `<aside>` for this. Both are inert, and
+without them nh3 unwraps every `.. note::` into an undistinguished paragraph,
+which loses the one thing an admonition is for. That changes what the pipeline
+emits, so `PIPELINE_VERSION` went to 2 — which is exactly what that number is
+for.
 
 `markdown-it-py` is preferred where present, because CommonMark is a
 specification rather than a dialect and the filesystem is the source of truth —

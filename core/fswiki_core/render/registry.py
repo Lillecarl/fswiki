@@ -24,7 +24,9 @@ from typing import Protocol, runtime_checkable
 # renderer id and therefore in the cache key, because a cached body is only
 # reusable if the whole pipeline that produced it is the same — the backend
 # alone does not identify the output.
-PIPELINE_VERSION = 1
+# 2: the sanitiser began allowing <section> and <aside>, so the same backend
+# on the same input now emits different bytes than it did at 1.
+PIPELINE_VERSION = 2
 
 
 @runtime_checkable

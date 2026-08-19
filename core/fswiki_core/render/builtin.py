@@ -67,6 +67,70 @@ class MistuneBackend:
         return self._md(text)
 
 
+class RstBackend:
+    """docutils: reStructuredText, with three of its settings held down.
+
+    Those settings are not configuration, they are the reason this backend is
+    safe to register at all, and each was measured rather than assumed:
+
+    **`file_insertion_enabled=False`.** With docutils' defaults,
+    ``.. include:: /etc/passwd`` opens that file and puts its contents in the
+    rendered page. That is arbitrary server-file disclosure written by one user
+    and read by another, and **the sanitiser does not stop it** -- the contents
+    arrive as ordinary text nodes rather than as tags, so nh3 passes them
+    straight through. Measured: with the default settings the file's contents
+    survive `safety.clean()` intact.
+
+    **`raw_enabled=False`.** ``.. raw:: html`` injects arbitrary markup.
+    Layered rather than load-bearing: nh3 does strip the `<script>` this one
+    produces. It is off for the same reason `html=False` is set on the markdown
+    backends -- hostile input should never become tags in the first place.
+
+    **`_disable_config=True`.** The one that is genuinely surprising. A
+    `docutils.conf` in the working directory **overrides `settings_overrides`**,
+    so without this a file sitting next to the server silently re-enables the
+    first two. Measured: the include leaked again with both flags set to False,
+    and stopped once config reading was off.
+
+    Cost, on this host: 5.14 ms for a 536 B page, against 0.62 ms for
+    markdown-it on a comparable one. reStructuredText is about eight times the
+    price of markdown per page, which is a few per cent of a request that
+    already spends ~70 ms talking to PostgREST.
+    """
+
+    name = "docutils"
+    content_types = ("text/x-rst",)
+
+    _SETTINGS = {
+        # See the docstring. These three are security, not taste.
+        "file_insertion_enabled": False,
+        "raw_enabled": False,
+        "_disable_config": True,
+        # A wiki page with a typo in it is still a page. Never raise, and never
+        # render docutils' own complaints into what the reader sees.
+        "report_level": 5,
+        "halt_level": 5,
+        "embed_stylesheet": False,
+        # Avoids a pygments dependency, and pygments emits inline style
+        # attributes that the sanitiser would drop anyway.
+        "syntax_highlight": "none",
+    }
+
+    def __init__(self) -> None:
+        import docutils
+        from docutils.core import publish_parts
+
+        self.version = docutils.__version__
+        self._publish = publish_parts
+
+    def to_html(self, text: str) -> str:
+        # `writer=` and not `writer_name=`: the latter is pending removal in
+        # docutils 2.0 and warns on every call.
+        return self._publish(
+            text, writer="html5", settings_overrides=self._SETTINGS
+        )["html_body"]
+
+
 class PlainTextBackend:
     """text/plain, wrapped in a <pre>. No library, so it is always available.
 
@@ -89,7 +153,7 @@ def _install() -> None:
     # Last registration wins the content type, so the preferred engine goes
     # last. Each failure is logged at debug: an absent optional dependency is
     # a deployment choice, not a fault.
-    for factory in (MistuneBackend, MarkdownItBackend, PlainTextBackend):
+    for factory in (MistuneBackend, MarkdownItBackend, RstBackend, PlainTextBackend):
         try:
             register(factory())
         except ImportError as exc:

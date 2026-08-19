@@ -25,6 +25,11 @@ TAGS = {
     "ul", "ol", "li", "dl", "dt", "dd",
     "table", "thead", "tbody", "tfoot", "tr", "th", "td",
     "a", "img", "span", "div",
+    # Structure that reStructuredText emits and markdown does not. Both are
+    # inert -- no scripting surface, no navigation -- and without them nh3
+    # unwraps every `.. note::` into an undistinguished paragraph, which loses
+    # the one thing an admonition is for.
+    "section", "aside",
 }
 
 ATTRIBUTES = {
@@ -36,6 +41,9 @@ ATTRIBUTES = {
     "th": {"align"}, "td": {"align"},
     "code": {"class"}, "pre": {"class"}, "span": {"class"}, "div": {"class"},
     "ol": {"start"},
+    # `class` carries which kind of admonition it is; `id` is what a deep link
+    # into a section needs. Both are inert, and div/span already allow class.
+    "aside": {"class"}, "section": {"id", "class"},
 }
 
 # Wiki links are relative paths under a reserved prefix rather than a custom

@@ -19,6 +19,7 @@ python3Packages.buildPythonPackage {
     python3Packages.nh3
     python3Packages.markdown-it-py
     python3Packages.mistune
+    python3Packages.docutils
   ];
 
   pythonImportsCheck = [
