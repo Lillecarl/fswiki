@@ -11,3 +11,9 @@ __pycache__/
 
 # pytest's own scratch
 .pytest_cache/
+
+# Coverage data. FSWIKI_COVERAGE=1 keeps its own under a temp dir, but a bare
+# `pytest --cov` drops one here.
+.coverage
+.coverage.*
+htmlcov/

@@ -629,7 +629,13 @@ def preview(stack, mount):
         wait_for(up, timeout=30, what="preview to answer")
         yield base
     finally:
-        proc.terminate()
+        # SIGINT, not SIGTERM: it is how the server says to stop it ("ctrl-c to
+        # stop"), so it is the path worth exercising -- and Python turns it
+        # into a KeyboardInterrupt that unwinds, where the default SIGTERM
+        # handler kills the process outright and runs no atexit hooks. Under
+        # FSWIKI_COVERAGE that difference is the whole of preview.py's
+        # measurement, which is written by one of those hooks.
+        proc.send_signal(signal.SIGINT)
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
