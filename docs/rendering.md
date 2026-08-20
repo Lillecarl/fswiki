@@ -714,9 +714,10 @@ argument is one the caller gets to make. They are two grants instead.
 
 ## Deliberately not yet
 
-- **Attachments and images.** An image referencing a wiki path needs the ACL
-  applied to something that is not a document, which is a schema question
-  before it is a rendering one.
+- **Attachments in the mount.** They exist -- see
+  [attachments.md](attachments.md) -- and a page may reference one by path.
+  What is missing is a binary file the FUSE driver can carry, which is a write
+  path and a merge before it is anything to do with rendering.
 - **Diagrams.** Publish-time materialisation, not the read path. Every diagram
   renderer worth having is a subprocess, and a subprocess in a read path is a
   sandbox, a timeout and a concurrency cap. Maths turned out not to need any of

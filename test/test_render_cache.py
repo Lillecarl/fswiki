@@ -211,7 +211,8 @@ async def test_a_new_revision_misses():
     await pages.page("root.welcome")
 
     client._document = {**PUBLISHED, "version": 4, "content": "# Hello again"}
-    status, html = await pages.page("root.welcome")
+    status, _, body = await pages.page("root.welcome")
+    html = body.decode()
 
     assert "Hello again" in html
     assert c.misses == 2
@@ -229,7 +230,8 @@ async def test_a_draft_is_never_cached():
 
     await pages.page("root.welcome")
     draft["content"] = "# Two"
-    _, html = await pages.page("root.welcome")
+    _, _, body = await pages.page("root.welcome")
+    html = body.decode()
 
     # On the rendered heading, not on the word: the stylesheet in the shell
     # has "One" in a comment, and searching for the word finds that instead.
@@ -268,14 +270,14 @@ async def test_two_readers_of_one_revision_get_their_own_link_graphs():
         async def outline(self):
             return [{"path": p, "is_folder": False} for p in self._paths]
 
-    _, allowed = await Pages(Reader(["root.welcome", "root.secret"]),
-                             drafts=False, cache=c).page("root.welcome")
-    _, refused = await Pages(Reader(["root.welcome"]),
-                             drafts=False, cache=c).page("root.welcome")
+    *_, allowed = await Pages(Reader(["root.welcome", "root.secret"]),
+                              drafts=False, cache=c).page("root.welcome")
+    *_, refused = await Pages(Reader(["root.welcome"]),
+                              drafts=False, cache=c).page("root.welcome")
 
-    assert 'href="/secret"' in allowed
+    assert 'href="/secret"' in allowed.decode()
     # The body, past the shell's own brand link.
-    assert refused.split("</header>")[1].startswith("<p>see secret</p>")
+    assert refused.decode().split("</header>")[1].startswith("<p>see secret</p>")
     assert c.hits == 1
 
 

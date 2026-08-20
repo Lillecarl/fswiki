@@ -94,6 +94,18 @@ class Config:
     # broken one: rendering is a couple of per cent of a page.
     render_cache_bytes: int = render_cache.DEFAULT_MAX_BYTES
 
+    # The upload cap, in bytes, enforced by the database.
+    #
+    # None means "leave whatever is there", which is what an unset environment
+    # variable should mean: the seed puts 10 MiB in on a fresh database, and an
+    # operator who raised it with an UPDATE should not find it back at ten
+    # megabytes because a server restarted without the variable set.
+    #
+    # Applied by migrate() rather than read here at request time. The limit has
+    # to be the database's -- psql is a client too -- so this is configuration
+    # being written down, not a check this program performs.
+    max_attachment_bytes: int | None = None
+
     @property
     def postgrest_url(self) -> str:
         return f"http://{self.postgrest_host}:{self.postgrest_port}"
@@ -122,4 +134,7 @@ class Config:
             postgrest_database_url=e.get("FSWIKI_POSTGREST_DATABASE_URL"),
             render_cache_bytes=int(
                 e.get("FSWIKI_RENDER_CACHE_BYTES", cls.render_cache_bytes)),
+            max_attachment_bytes=(
+                int(e["FSWIKI_MAX_ATTACHMENT_BYTES"])
+                if e.get("FSWIKI_MAX_ATTACHMENT_BYTES") else None),
         )

@@ -68,6 +68,13 @@ class PostgrestError(RuntimeError):
                          f"{self.status} {message or self.body}")
 
 
+def _unhex(value: str | bytes | None) -> bytes | None:
+    """PostgREST hands `bytea` back the way Postgres prints it: `\\x0102`."""
+    if value is None or isinstance(value, bytes):
+        return value
+    return bytes.fromhex(value[2:] if value.startswith("\\x") else value)
+
+
 class Client:
     """One identity, and by default a connection pool of its own.
 
@@ -303,7 +310,7 @@ class Client:
         """
         r = await self._reading(
             f"/{self._view}", "document_at",
-            params={"select": "id,path,content,content_type,version",
+            params={"select": "id,path,content,content_type,version,is_attachment",
                     **({} if self.impersonating else {"path": f"eq.{path}"})},
             body={"p_path": path},
         )
@@ -327,6 +334,69 @@ class Client:
         r = await self._http.post(f"/rpc/{rpc}",
                                   json={"p_query": query, "p_limit": limit})
         return self._rows(r)
+
+    # -- attachments -------------------------------------------------------
+
+    async def attachment(self, path: str) -> dict | None:
+        """One attachment by path, bytes included, or None.
+
+        Always the RPC form: `wiki.attachment_at` is volatile so that one
+        endpoint serves an impersonated caller too, the same reasoning as
+        `search`. SECURITY INVOKER, so a file you may not read is a file that
+        is not there -- which is the answer every other read here gives.
+
+        **The bytes arrive hex-encoded**, because PostgREST renders `bytea`
+        the way Postgres does and JSON has no bytes. That doubles them in
+        transit and costs a decode: measured at about 1.5 ms for a 100 kB
+        image and 150 ms at the 10 MiB cap. Accepted rather than split into a
+        second request for a scalar column with
+        `Accept: application/octet-stream`, which would be exact and would
+        also make every image two round trips instead of one. If a wiki ever
+        serves large files often, that is the fix, and it is a change to this
+        method alone.
+        """
+        r = await self._http.post("/rpc/attachment_at", json={"p_path": path})
+        rows = self._rows(r)
+        if not rows:
+            return None
+        row = dict(rows[0])
+        row["bytes"] = _unhex(row.get("bytes"))
+        row["sha256"] = _unhex(row.get("sha256"))
+        return row
+
+    async def attach(self, path: str, media_type: str, payload: bytes) -> dict:
+        """Store or replace an attachment. Returns `{document_id, created, byte_size}`.
+
+        The size limit is the database's, so a file over it comes back as a
+        PostgrestError naming the cap rather than as a refusal this client
+        invented. A client-side check would be a second limit to keep in step,
+        and the one that matters is the one psql also has to obey.
+        """
+        r = await self._http.post(
+            "/rpc/attach",
+            json={"p_path": path, "p_media_type": media_type,
+                  "p_bytes": "\\x" + payload.hex()})
+        rows = self._rows(r)
+        return rows[0] if rows else {}
+
+    async def detach(self, path: str) -> bool:
+        """Remove an attachment permanently. False if there was none.
+
+        Permanent, and there is no retire to offer instead: an attachment has
+        no revisions to fall back on. It needs `purge` for that reason.
+        """
+        r = await self._http.post("/rpc/detach", json={"p_path": path})
+        if r.status_code >= 400:
+            raise PostgrestError(r)
+        return r.json() is True
+
+    async def max_attachment_bytes(self) -> int | None:
+        """The wiki's upload cap, for saying so before a big file is sent."""
+        r = await self._http.post("/rpc/max_attachment_bytes", json={})
+        if r.status_code >= 400:
+            return None
+        value = r.json()
+        return int(value) if value is not None else None
 
     # -- drafts ------------------------------------------------------------
 

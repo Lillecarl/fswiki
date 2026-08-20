@@ -240,6 +240,19 @@ def migrate(config: Config) -> Migration:
         for path in tracks["seed"]:
             _run(conn, path)
 
+        # After the seed, because the seed's `on conflict do nothing` is what
+        # gives a fresh database a limit at all and this is what overrides it.
+        # Only when the variable is set: an unset one means "leave it", so an
+        # operator's own value survives a restart.
+        if config.max_attachment_bytes is not None:
+            log.info("attachment limit set to %d bytes", config.max_attachment_bytes)
+            conn.execute(
+                "insert into wiki.setting (key, value) values "
+                "('max_attachment_bytes', %s) "
+                "on conflict (key) do update set value = excluded.value, "
+                "updated_at = now()",
+                (str(config.max_attachment_bytes),))
+
         # Tell every PostgREST on this database that the runtime half moved.
         #
         # Inside the transaction on purpose. PostgreSQL holds a NOTIFY until

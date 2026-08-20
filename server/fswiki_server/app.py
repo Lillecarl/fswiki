@@ -52,10 +52,17 @@ SESSION_COOKIE = "fswiki_session"
 # in this program, no script at all -- live_reload is the preview's, not ours.
 # A wiki renders text one person wrote for another to read, so the sanitiser in
 # fswiki_core.render.safety is the first line and this is the second.
+#
+# `img-src 'self'` is the one widening, and it is what makes an attachment
+# visible in a page at all -- an image is served from this origin at its own
+# path. It admits nothing an author could not already write: `src` is
+# allowlisted by the sanitiser, and a remote host is still refused, so a page
+# cannot phone home by naming an image on someone else's server. The response
+# carrying the bytes adds a policy of its own; see pages.attachment_headers.
 SECURITY_HEADERS = [
     (b"cache-control", b"no-store"),
     (b"content-security-policy",
-     b"default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
+     b"default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; "
      b"base-uri 'none'; form-action 'none'; frame-ancestors 'none'"),
     (b"x-content-type-options", b"nosniff"),
     # A wiki path is not a secret but it is not somebody else's business
@@ -145,7 +152,9 @@ class Application:
             return
 
         status, kind, body = await self._respond(scope)
-        await self._send(send, status, kind, body, body_bytes=method != "HEAD")
+        await self._send(send, status, kind, body, body_bytes=method != "HEAD",
+                         extra=[(k.encode(), v.encode())
+                                for k, v in pages_mod.attachment_headers(kind)])
 
     async def _respond(self, scope: dict) -> tuple[int, str, bytes]:
         pages, client = self.pages_for(token_from(scope.get("headers", [])))

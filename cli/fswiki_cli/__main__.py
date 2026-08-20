@@ -6,6 +6,8 @@
     fswiki revert                 throw a draft away
     fswiki preview                read it in a browser while you write
     fswiki push -m "..." a/b.md   publish a subset
+    fswiki attach logo.png pub/   put a file in the wiki
+    fswiki detach pub/logo.png    take it out again, permanently
 
 Push is all or nothing, the way `svn commit` is. If anything conflicts, nothing
 is written and your drafts are left where they were, with the server's copy
@@ -15,12 +17,14 @@ attached so you can merge and try again.
 from __future__ import annotations
 
 import argparse
+import mimetypes
 import os
 import sys
+from pathlib import Path
 
 import anyio
 
-from fswiki_core import merge, render
+from fswiki_core import merge, naming, render
 from fswiki_core.client import Client, PostgrestError, Unreachable
 
 from . import paths, preview, report
@@ -92,6 +96,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p_revert.add_argument("--apply", action="store_true",
                           help="actually withdraw them; without it, only report")
 
+    p_attach = sub.add_parser(
+        "attach", help="store a file in the wiki, or replace one")
+    p_attach.add_argument("file", help="the local file to upload")
+    p_attach.add_argument(
+        "path",
+        help="where to put it, e.g. public/diagrams/ or public/diagrams/plan.png")
+    p_attach.add_argument(
+        "--type", dest="media_type",
+        help="media type; guessed from the filename when not given")
+
+    p_detach = sub.add_parser(
+        "detach", help="remove an attachment; there is no undo")
+    p_detach.add_argument("path", help="the attachment to remove")
+
     p_push = sub.add_parser("push", help="publish drafts")
     p_push.add_argument("paths", nargs="*",
                         help="paths to publish; default is everything pending")
@@ -145,6 +163,14 @@ async def run(args: argparse.Namespace) -> int:
         if args.command == "whoami":
             print(principal)
             return 0
+
+        # Before the draft list, which neither of these needs: an attachment
+        # is not a draft and never becomes one.
+        if args.command == "attach":
+            return await _attach(client, args)
+
+        if args.command == "detach":
+            return await _detach(client, args.path)
 
         drafts = await client.drafts()
 
@@ -419,6 +445,84 @@ async def _revert(client: Client, drafts: list[dict], *, apply: bool) -> int:
             return 1
 
     print(report.render_revert(entries, applied=True))
+    return 0
+
+
+async def _attach(client: Client, args: argparse.Namespace) -> int:
+    """Upload one file.
+
+    The size limit is the wiki's, and it is asked for rather than assumed: the
+    number lives in the database because psql is a client too, and a copy here
+    would be a second limit to keep in step. It is read before the upload only
+    so that a large file fails in a sentence instead of a round trip.
+    """
+    source = Path(args.file)
+    try:
+        payload = source.read_bytes()
+    except OSError as exc:
+        print(f"fswiki: cannot read {source}: {exc}", file=sys.stderr)
+        return 1
+
+    media_type = args.media_type or mimetypes.guess_type(source.name)[0]
+    if not media_type:
+        print(f"fswiki: cannot tell what {source.name} is; pass --type",
+              file=sys.stderr)
+        return 1
+
+    # A path ending in `/` means "into this folder, under its own name", which
+    # is what `cp` does and therefore what a person expects.
+    wanted = args.path
+    if wanted.endswith("/"):
+        wanted += naming.attachment_filename(source.stem, media_type)
+    try:
+        target = naming.from_route(wanted)
+    except ValueError as exc:
+        print(f"fswiki: {exc}", file=sys.stderr)
+        return 1
+
+    cap = await client.max_attachment_bytes()
+    if cap is not None and len(payload) > cap:
+        print(f"fswiki: {source.name} is {len(payload)} bytes; this wiki "
+              f"accepts at most {cap}", file=sys.stderr)
+        return 1
+
+    try:
+        result = await client.attach(target, media_type, payload)
+    except PostgrestError as exc:
+        print(f"fswiki: {exc}", file=sys.stderr)
+        return 1
+
+    display = naming.attachment_filename(
+        naming.to_display(target).rsplit("/", 1)[-1], media_type)
+    verb = "attached" if result.get("created") else "replaced"
+    print(f"{verb} {naming.to_display(target)} ({display}, "
+          f"{result.get('byte_size', len(payload))} bytes)")
+    return 0
+
+
+async def _detach(client: Client, wanted: str) -> int:
+    """Remove one, permanently.
+
+    Permanent because an attachment has no revisions -- there is no retire to
+    offer instead -- so the wiki asks for `purge` and this says so plainly
+    rather than reporting a cheerful "removed".
+    """
+    try:
+        target = naming.from_route(wanted)
+    except ValueError as exc:
+        print(f"fswiki: {exc}", file=sys.stderr)
+        return 1
+    try:
+        gone = await client.detach(target)
+    except PostgrestError as exc:
+        print(f"fswiki: {exc}", file=sys.stderr)
+        return 1
+    if not gone:
+        print(f"fswiki: nothing to remove at {naming.to_display(target)}",
+              file=sys.stderr)
+        return 1
+    print(f"removed {naming.to_display(target)} — permanently; "
+          f"an attachment has no history")
     return 0
 
 

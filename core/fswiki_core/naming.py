@@ -41,6 +41,39 @@ TYPE_BY_EXT: dict[str, str] = {ext: typ for typ, ext in _EXTENSIONS}
 
 DEFAULT_CONTENT_TYPE = "text/markdown"
 
+# Media types an attachment may be served under, and the extension each shows.
+#
+# A separate map from the one above, and that is not tidiness. `_EXTENSIONS`
+# holds *document* content types, and `parse_filename` uses it to decide what a
+# file written into the mount means. Put `.png` in there and a `logo.png`
+# saved into a directory becomes a document claiming to be an image, with text
+# in it. A binary file appearing in the mount must stay scratch until the FUSE
+# driver can carry bytes.
+#
+# The list is short on purpose. It is what a browser is asked to display or
+# download, so every entry is a decision; `fswiki_core.pages.INLINE` narrows it
+# again to what may render in the page rather than download.
+_ATTACHMENT_EXTENSIONS: tuple[tuple[str, str], ...] = (
+    ("image/png", ".png"),
+    ("image/jpeg", ".jpg"),
+    ("image/jpeg", ".jpeg"),
+    ("image/gif", ".gif"),
+    ("image/webp", ".webp"),
+    ("image/avif", ".avif"),
+    ("image/svg+xml", ".svg"),
+    ("application/pdf", ".pdf"),
+    ("application/zip", ".zip"),
+    ("audio/mpeg", ".mp3"),
+    ("video/mp4", ".mp4"),
+)
+
+ATTACHMENT_EXT_BY_TYPE: dict[str, str] = {}
+for _type, _ext in _ATTACHMENT_EXTENSIONS:
+    ATTACHMENT_EXT_BY_TYPE.setdefault(_type, _ext)
+
+ATTACHMENT_TYPE_BY_EXT: dict[str, str] = {
+    ext: typ for typ, ext in _ATTACHMENT_EXTENSIONS}
+
 
 def is_slug(value: str) -> bool:
     """Would the server accept this as a slug?
@@ -79,6 +112,16 @@ def parse_filename(name: str) -> tuple[str, str] | None:
     if content_type is None or not is_slug(slug):
         return None
     return slug, content_type
+
+
+def attachment_filename(slug: str, media_type: str | None) -> str:
+    """What an attachment is called, for a URL and for a download.
+
+    An unknown media type gets no extension rather than a guessed one. The
+    browser is told the type in a header either way, and inventing `.bin` would
+    put a lie in the filename a person saves.
+    """
+    return slug + ATTACHMENT_EXT_BY_TYPE.get(media_type or "", "")
 
 
 def ltree_labels(path: str) -> list[str]:
@@ -138,3 +181,22 @@ def from_display(path: str) -> str:
             raise ValueError(f"{part!r} is not a valid path element")
         labels.append(part)
     return ".".join(["root", *labels])
+
+
+def from_route(path: str) -> str:
+    """A browser URL to a wiki path. `from_display`, plus attachment names.
+
+    Separate because the two callers want different things from an unknown
+    extension. A wikilink to `report.tar.gz` should stay literal text, so
+    `from_display` raises. A *URL* ending in `.png` is somebody asking for a
+    file, and refusing it would mean an attachment could only be linked
+    without the extension a browser and a download both expect.
+
+    Only the extensions this wiki actually serves are stripped, so the two
+    functions still agree that `report.tar.gz` is not a name the wiki holds.
+    """
+    head, _, tail = path.replace("\\", "/").rpartition("/")
+    stem, dot, ext = tail.rpartition(".")
+    if dot and ("." + ext) in ATTACHMENT_TYPE_BY_EXT and is_slug(stem):
+        tail = stem
+    return from_display(f"{head}/{tail}" if head else tail)

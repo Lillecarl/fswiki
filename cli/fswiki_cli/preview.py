@@ -89,6 +89,11 @@ def _handler(pages: Pages, portal: anyio.from_thread.BlockingPortal):
             self.send_response(status)
             self.send_header("Content-Type", kind)
             self.send_header("Content-Length", str(len(payload)))
+            # An attachment needs a disposition and a policy of its own, and
+            # both are decided from the content type so that this and the
+            # server cannot drift. See pages.attachment_headers.
+            for name, value in pages_mod.attachment_headers(kind):
+                self.send_header(name, value)
             # A preview is only useful if it is not cached.
             self.send_header("Cache-Control", "no-store")
             if allow:

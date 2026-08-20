@@ -188,6 +188,51 @@ ul.tree .folder { color: var(--dim); font-size: .8rem; letter-spacing: .04em;
                   text-transform: uppercase; margin-top: 1rem; }
 """
 
+#: What an attachment is served as, and what a browser may put in the page.
+#:
+#: Two rules from one set, and both matter:
+#:
+#: * A type in here is sent as itself with `Content-Disposition: inline`.
+#: * Anything else is still sent as its declared type, but with
+#:   `Content-Disposition: attachment`, which stops a browser from *rendering*
+#:   it as a document when somebody navigates straight to it.
+#:
+#: That second rule is what makes an SVG safe without banning it. `<img>`
+#: ignores `Content-Disposition`, so a diagram still draws in the page; a
+#: direct visit downloads the file rather than opening a document that could
+#: carry `<script>`. `attachment_headers` adds a CSP of its own on top, which
+#: is the belt to that pair of braces -- and the raster types are in here
+#: precisely because none of them can carry script at all.
+INLINE = {"image/png", "image/jpeg", "image/gif", "image/webp", "image/avif"}
+
+#: Sent with every attachment, alongside the site-wide set.
+#:
+#: A second `content-security-policy` header rather than a different one: a
+#: browser enforces every policy it is given, so two headers intersect and the
+#: stricter wins. `sandbox` with no `allow-scripts` is what neutralises a file
+#: opened as a document -- an SVG, an HTML file somebody uploaded -- even
+#: before `Content-Disposition` gets a chance to.
+ATTACHMENT_CSP = ("default-src 'none'; sandbox; base-uri 'none'; "
+                  "form-action 'none'; frame-ancestors 'none'")
+
+
+def attachment_headers(kind: str) -> list[tuple[str, str]]:
+    """What a response of this kind needs beyond the site-wide headers.
+
+    Keyed on the content type alone, so the preview and the server cannot
+    disagree about it, and so a route added later gets the right headers by
+    saying what it is serving rather than by remembering to ask.
+    """
+    if kind in (HTML, TEXT):
+        return []
+    disposition = "inline" if kind in INLINE else "attachment"
+    # No `filename=`: an attachment is served at its own path, so the last
+    # segment of the URL is already `logo.png` and the browser uses it. A
+    # filename here would be a second copy of the same name, able to disagree.
+    return [("content-disposition", disposition),
+            ("content-security-policy", ATTACHMENT_CSP)]
+
+
 #: The search box, on every page rather than on a page of its own. A wiki you
 #: have to navigate to in order to search is a wiki people grep instead.
 FIND = ("<form class=find action='" + RESERVED + "search' role=search>"
@@ -366,8 +411,12 @@ class Pages:
             # reload that does not happen, never a page that stops being served.
             return ""
 
-    async def page(self, path: str) -> tuple[int, str]:
-        """One rendered document, or a not-found page.
+    async def page(self, path: str) -> tuple[int, str, bytes]:
+        """What is at this path: a rendered document, an attachment, or a 404.
+
+        Three kinds now, so the answer carries its own content type rather
+        than being assumed to be HTML. `attachment_headers` turns that type
+        into the rest of the response.
 
         A document that is not there and one that is not ours to read produce
         the same answer, because the view behind this already refuses to tell
@@ -386,7 +435,10 @@ class Pages:
         else:
             row = await self._client.document(path)
             if row is None:
-                return 404, self.shell("Not here", missing_body(path), path, None)
+                return self._html(404, self.shell("Not here", missing_body(path),
+                                                  path, None))
+            if row.get("is_attachment"):
+                return await self._file(path)
             text = row.get("content") or ""
             content_type = row.get("content_type") or "text/markdown"
             state = f"revision {row.get('version')}"
@@ -401,16 +453,42 @@ class Pages:
             neutral = self._body(source, content_type,
                                  None if draft is not None else row)
         except (render.UnknownBackend, render.safety.SanitiserUnavailable) as exc:
-            return 500, self.shell("Cannot render", f"<p>{html.escape(str(exc))}</p>",
-                                   path, None)
+            return self._html(500, self.shell(
+                "Cannot render", f"<p>{html.escape(str(exc))}</p>", path, None))
 
         visible = await self.visible()
         body = render.links.resolve(
             neutral,
             lambda target: "/" + naming.to_display(target) if target in visible else None,
         )
-        return 200, self.shell(naming.to_display(path), body, path, state,
-                               options)
+        return self._html(200, self.shell(naming.to_display(path), body, path,
+                                          state, options))
+
+    @staticmethod
+    def _html(status: int, markup: str) -> tuple[int, str, bytes]:
+        return status, HTML, markup.encode()
+
+    async def _file(self, path: str) -> tuple[int, str, bytes]:
+        """An attachment's bytes, or the same 404 anything else would give.
+
+        A second request, because `current_document` deliberately does not
+        join to `wiki.attachment`: that table's policy is an ACL walk per row,
+        measured at 0.35 ms, and the view is read by every request -- 138 ms
+        added to a 1,420-row manifest for 400 files. One extra round trip on
+        an image is the cheaper half of that trade.
+
+        The type is narrowed here rather than trusted. The database already
+        refuses a media type that could carry a header, and `INLINE` decides
+        what a browser is allowed to do with it.
+        """
+        found = await self._client.attachment(path)
+        if found is None:
+            # It was there a request ago. Same answer as never having been,
+            # because that is the answer every other read gives.
+            return self._html(404, self.shell("Not here", missing_body(path),
+                                              path, None))
+        return 200, found.get("media_type") or "application/octet-stream", \
+            found.get("bytes") or b""
 
     def _body(self, text: str, content_type: str, row: dict | None) -> str:
         """The rendered body with its links still neutral, cached where it can be.
@@ -559,10 +637,12 @@ class Pages:
 
         wanted = route.lstrip("/")
         try:
-            path = wanted if naming.looks_like_ltree(wanted) else naming.from_display(wanted)
+            # from_route, not from_display: a URL ending in `.png` is somebody
+            # asking for a file, where a wikilink ending in `.tar.gz` should
+            # stay literal text. See naming.from_route.
+            path = wanted if naming.looks_like_ltree(wanted) else naming.from_route(wanted)
         except ValueError:
             return 404, HTML, self.shell(
                 "Not here", "<p>Not a path this wiki can hold.</p>", "", None).encode()
 
-        status, page = await self.page(path)
-        return status, HTML, page.encode()
+        return await self.page(path)
