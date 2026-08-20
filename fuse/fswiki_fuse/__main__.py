@@ -209,6 +209,11 @@ async def run(args: argparse.Namespace) -> int:
         options.add("fsname=fswiki")
         if sys.platform == "darwin":
             options.add(f"backend={args.backend}")
+            if args.backend == "nfs":
+                # NFSv4 represents extended attributes as named attributes.
+                # FUSE-T can disable that bridge; request it explicitly so
+                # fswiki's metadata reaches getxattr/listxattr.
+                options.add("namedattr")
         options.discard("default_permissions")
         if fs.read_only:
             # The kernel then refuses writes before they ever reach us, which

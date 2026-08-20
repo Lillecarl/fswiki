@@ -36,3 +36,18 @@ index f434770..0fc680c 100644
 -
  def setxattr(path, name, bytes value, namespace='user'):
      '''Set extended attribute
+diff --git a/src/pyfuse3/internal.pxi b/src/pyfuse3/internal.pxi
+index 0b62abc..1341768 100644
+--- a/src/pyfuse3/internal.pxi
++++ b/src/pyfuse3/internal.pxi
+@@ -62,8 +62,8 @@ cdef void init_fuse_ops():
+     fuse_ops.releasedir = fuse_releasedir
+     fuse_ops.fsyncdir = fuse_fsyncdir
+     fuse_ops.statfs = fuse_statfs
+-    ASSIGN_NOT_DARWIN(fuse_ops.setxattr, &fuse_setxattr)
+-    ASSIGN_NOT_DARWIN(fuse_ops.getxattr, &fuse_getxattr)
++    fuse_ops.setxattr = fuse_setxattr
++    fuse_ops.getxattr = fuse_getxattr
+     fuse_ops.listxattr = fuse_listxattr
+     fuse_ops.removexattr = fuse_removexattr
+     fuse_ops.access = fuse_access

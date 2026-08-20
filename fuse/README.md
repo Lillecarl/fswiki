@@ -34,6 +34,12 @@ is outside FSKit's documented mount-point contract.
     nix run --file .. fuse -- --backend fskit \
       --token "$(fswiki-dev token bob)" /Volumes/fswiki
 
+FUSE-T 1.2.7's NFS named-attribute bridge currently lists fswiki's
+`user.fswiki.*` attributes but sends an empty name in the subsequent FUSE
+`GETXATTR` request. Ordinary file operations are unaffected; reading fswiki
+xattrs through macOS `xattr(1)` is therefore not supported until that upstream
+bridge bug is fixed.
+
 | module | |
 | --- | --- |
 | `naming.py` | filenames <-> ltree slugs, and what counts as scratch |
