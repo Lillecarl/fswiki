@@ -193,10 +193,15 @@ async def run(args: argparse.Namespace) -> int:
         except (PostgrestError, Unreachable) as exc:
             log.error("cannot read the wiki: %s", exc)
             return 1
-        log.info("mounted %d entries at %s", len(tree.nodes), args.mountpoint)
+        log.info("mounting %d entries at %s", len(tree.nodes), args.mountpoint)
 
         options = set(pyfuse3.default_options)
         options.add("fsname=fswiki")
+        if sys.platform == "darwin":
+            # FUSE-T also has an NFS backend. Select its FSKit transport
+            # explicitly so the mount stays entirely within Apple's supported
+            # userspace filesystem path.
+            options.add("backend=fskit")
         options.discard("default_permissions")
         if fs.read_only:
             # The kernel then refuses writes before they ever reach us, which

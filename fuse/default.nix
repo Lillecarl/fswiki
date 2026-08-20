@@ -1,10 +1,20 @@
-{ lib
-, python3Packages
-, fuse3
-, makeWrapper
-, callPackage
+{
+  lib,
+  python3Packages,
+  fuse3,
+  makeWrapper,
+  callPackage,
+  stdenv,
 }:
 
+let
+  fuse-t = callPackage ../nix/fuse-t/fuse-t.nix { };
+  pyfuse3 =
+    if stdenv.hostPlatform.isDarwin then
+      callPackage ../nix/fuse-t/pyfuse3-t.nix { }
+    else
+      python3Packages.pyfuse3;
+in
 python3Packages.buildPythonApplication {
   pname = "fswiki-fuse";
   version = "0.1.0";
@@ -16,7 +26,7 @@ python3Packages.buildPythonApplication {
 
   dependencies = [
     (callPackage ../core { })
-    python3Packages.pyfuse3
+    pyfuse3
     python3Packages.trio
     python3Packages.anyio
   ];
@@ -33,10 +43,17 @@ python3Packages.buildPythonApplication {
   # fails with "Operation not permitted" while `fusermount3 --version` works
   # fine. The store copy stays on the end as a fallback for non-NixOS hosts,
   # where the distro's own setuid copy is in /usr/bin and found first anyway.
-  postFixup = ''
-    wrapProgram $out/bin/fswiki-mount \
-      --suffix PATH : ${lib.makeBinPath [ fuse3 ]}
-  '';
+  postFixup =
+    if stdenv.hostPlatform.isDarwin then
+      ''
+        wrapProgram $out/bin/fswiki-mount \
+          --set FUSE_NFSSRV_PATH ${fuse-t}/bin/go-nfsv4
+      ''
+    else
+      ''
+        wrapProgram $out/bin/fswiki-mount \
+          --suffix PATH : ${lib.makeBinPath [ fuse3 ]}
+      '';
 
   pythonImportsCheck = [
     "fswiki_fuse"

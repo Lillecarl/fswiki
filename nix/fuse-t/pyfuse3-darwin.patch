@@ -1,0 +1,38 @@
+diff --git a/src/pyfuse3/__init__.pyx b/src/pyfuse3/__init__.pyx
+index f434770..0fc680c 100644
+--- a/src/pyfuse3/__init__.pyx
++++ b/src/pyfuse3/__init__.pyx
+@@ -43,11 +43,9 @@ cimport libc_extra
+ # EXTERNAL DEFINITIONS #
+ ########################
+ 
+-
+-cdef extern from "<linux/fs.h>" nogil:
+-  enum:
+-    RENAME_EXCHANGE
+-    RENAME_NOREPLACE
++cdef enum:
++    RENAME_NOREPLACE = 1
++    RENAME_EXCHANGE = 2
+ 
+ cdef extern from "Python.h" nogil:
+     int PY_SSIZE_T_MAX
+@@ -631,16 +629,10 @@ def syncfs(path):
+     particular relation to libfuse, it is provided by pyfuse3 as a convenience.
+     '''
+ 
+-    cdef int ret
+-
+     fd = os.open(path, flags=os.O_DIRECTORY)
+     try:
+-        ret = libc_extra.syncfs(fd)
+-
+-        if ret != 0:
+-            raise OSError(errno.errno, strerror(errno.errno), path)
++        os.fsync(fd)
+     finally:
+         os.close(fd)
+ 
+-
+ def setxattr(path, name, bytes value, namespace='user'):
+     '''Set extended attribute
