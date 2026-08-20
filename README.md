@@ -83,7 +83,7 @@ develop holes that depend on what you read earlier. See
 | [`fuse/`](fuse/) | `fswiki-mount`. The tree, on **trio** — pyfuse3's native backend. |
 | [`cli/`](cli/) | `fswiki`. status, diff, push, revert, merge, render, preview. |
 | [`dev/`](dev/) | Real Postgres and PostgREST under process-compose. Nothing is mocked. |
-| [`test/`](test/) | 862 tests against all of it, at 91% of the lines. See [test/README.md](test/README.md). |
+| [`test/`](test/) | 905 tests against all of it, at 91% of the lines. See [test/README.md](test/README.md). |
 
 ## Running it
 
@@ -165,8 +165,8 @@ anything changes.
 ## Testing
 
 ```console
-$ nix build --file . tests.check -L      # 707 tests, ~45s, in a pure build sandbox
-$ nix run --file . tests                 # all 862, if you have /dev/fuse
+$ nix build --file . tests.check -L      # 746 tests, ~65s, in a pure build sandbox
+$ nix run --file . tests                 # all 905, if you have /dev/fuse
 ```
 
 The mount tests need a real `/dev/fuse` and a namespace to mount in;
@@ -197,13 +197,15 @@ measurements that settled them.
 - [docs/change-notification.md](docs/change-notification.md) — a few bytes
   against six kilobytes, why the obvious token was wrong, and why a
   notification bridge must never carry content.
+- [docs/search.md](docs/search.md) — why a text index and a row-level security
+  policy want opposite things from the planner, and what that costs.
 
 ## Status
 
 Working and used, but early. Notably absent, and deliberately so: attachments
 and images (the ACL would have to apply to something that is not a document,
-which is a schema question before it is a rendering one), search, and any
-identity provider beyond "a JWT with a subject the database recognises".
+which is a schema question before it is a rendering one) and any identity
+provider beyond "a JWT with a subject the database recognises".
 
 Requires PostgreSQL 16 or newer — `ltree` labels only accept hyphens and
 non-ASCII from 16 on, and slugs depend on that.

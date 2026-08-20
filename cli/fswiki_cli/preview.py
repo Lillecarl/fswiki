@@ -66,9 +66,10 @@ def _handler(pages: Pages, portal: anyio.from_thread.BlockingPortal):
             self.do_GET(body=False)
 
         def do_GET(self, body: bool = True):
-            route = urllib.parse.urlsplit(self.path).path
+            split = urllib.parse.urlsplit(self.path)
             try:
-                status, kind, payload = portal.call(pages.respond, route)
+                status, kind, payload = portal.call(
+                    pages.respond, split.path, split.query)
             except Unreachable:
                 # 502 rather than 500: this server is fine, the one behind it is
                 # not, and a preview left open in a tab is going to meet that

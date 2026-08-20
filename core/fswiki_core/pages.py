@@ -21,6 +21,8 @@ link that works in one works in the other.
 from __future__ import annotations
 
 import html
+import re
+import urllib.parse
 
 from . import naming, render
 from .client import Client, PostgrestError, Unreachable
@@ -156,6 +158,26 @@ pre .gh,pre .gu { color: var(--hl-comment); font-weight: 600; }
 pre .ge { font-style: italic; }
 pre .gs { font-weight: 600; }
 
+/* Search. The box rides in the header on every page, so it has to be small
+   enough not to push the breadcrumb around on a phone. */
+form.find { margin: 0; }
+form.find input {
+  font: inherit; font-size: .85rem; font-family: ui-sans-serif, system-ui, sans-serif;
+  background: var(--tint); color: var(--fg); border: 1px solid var(--rule);
+  border-radius: 4px; padding: .2rem .5rem; width: 9rem; max-width: 30vw;
+}
+ol.results { list-style: none; padding: 0; margin: 0; }
+ol.results li { margin: 0 0 1.6rem; }
+ol.results .where { font-family: ui-sans-serif, system-ui, sans-serif;
+                    font-size: .95rem; }
+ol.results .excerpt { color: var(--dim); font-size: .95rem; margin: .25rem 0 0; }
+/* The highlight the excerpt asked for. `mark` rather than a colour of its own:
+   the default is a background, which survives both schemes. See render.search
+   -- the marks arrive as control characters and become tags here, never
+   before. */
+mark { background: var(--tint); color: var(--fg); font-weight: 600;
+       padding: 0 .1em; border-radius: 2px; }
+
 /* The index. Indentation carries the tree, so nothing else has to. */
 ul.tree { list-style: none; padding: 0; font-family: ui-sans-serif, system-ui, sans-serif;
           font-size: .95rem; }
@@ -165,6 +187,12 @@ ul.tree a:hover { text-decoration: underline; }
 ul.tree .folder { color: var(--dim); font-size: .8rem; letter-spacing: .04em;
                   text-transform: uppercase; margin-top: 1rem; }
 """
+
+#: The search box, on every page rather than on a page of its own. A wiki you
+#: have to navigate to in order to search is a wiki people grep instead.
+FIND = ("<form class=find action='" + RESERVED + "search' role=search>"
+        "<input name=q type=search placeholder='Search' "
+        "aria-label='Search this wiki'></form>")
 
 RELOAD = """
 (function () {
@@ -186,6 +214,44 @@ RELOAD = """
 #: default, so adding one to `frontmatter.LAYOUTS` without a rule for it is
 #: harmless rather than an injection point.
 LAYOUT = {"default": "", "wide": " class=wide"}
+
+
+#: How `wiki.search` delimits a match inside an excerpt: STX and ETX.
+#:
+#: Control characters rather than tags, and that is the whole safety argument.
+#: `ts_headline` does not escape what it is given, so its output is one
+#: person's document with markers in it; markers that were already HTML would
+#: arrive at another person's browser as markup they did not write. These two
+#: cannot be mistaken for markup by anything, and `excerpt_html` below turns
+#: them into tags only after everything around them has been escaped.
+MARK_OPEN, MARK_CLOSE = "\x02", "\x03"
+
+
+def excerpt_html(text: str) -> str:
+    """One search excerpt, escaped, with the matches marked.
+
+    A small state machine rather than two `replace` calls, so the output is
+    balanced whatever the input was. An author who types a STX into a page
+    would otherwise open a `<mark>` that never closes and tint the rest of the
+    results list; here the worst they achieve is a highlight in their own
+    excerpt, which is what they asked for.
+    """
+    out: list[str] = []
+    marking = False
+    for chunk in re.split(f"([{MARK_OPEN}{MARK_CLOSE}])", text or ""):
+        if chunk == MARK_OPEN:
+            if not marking:
+                out.append("<mark>")
+                marking = True
+        elif chunk == MARK_CLOSE:
+            if marking:
+                out.append("</mark>")
+                marking = False
+        else:
+            out.append(html.escape(chunk))
+    if marking:
+        out.append("</mark>")
+    return "".join(out)
 
 
 def missing_body(path: str) -> str:
@@ -258,7 +324,7 @@ class Pages:
             f"{banner}"
             f"<header><a class=brand href='/'>fswiki</a>"
             f"<span class=state>{crumb}{' &middot; ' + html.escape(state) if state else ''}"
-            f"</span></header>{body}"
+            f"</span>{FIND}</header>{body}"
             f"{reload_script}</body></html>"
         )
 
@@ -371,6 +437,66 @@ class Pages:
             self._cache.put(key, rendered.html)
         return rendered.html
 
+    # -- search ------------------------------------------------------------
+
+    async def search(self, query: str, *, limit: int = 20) -> list[dict]:
+        """Ranked matches for `query`, drafts folded in where this is a preview.
+
+        The filtering is not done here and could not be: `wiki.search` applies
+        the caller's own `read`, so a page this reader may not see never
+        reaches this process. That is the same reason `page()` does not check
+        anything either.
+
+        A draft of a page that is also published wins, because a draft is what
+        its author sees everywhere else -- in the mount, in `fswiki status` and
+        on the page itself. Search disagreeing would be search being wrong.
+        """
+        rows = [dict(row, state=None) for row in
+                await self._client.search(query, limit=limit)]
+        if self._drafts:
+            drafts = [dict(row, state="draft") for row in
+                      await self._client.search(query, limit=limit, drafts=True)]
+            drafted = {row["path"] for row in drafts}
+            rows = drafts + [row for row in rows if row["path"] not in drafted]
+        rows.sort(key=lambda row: (-(row.get("rank") or 0.0), row["path"]))
+        return rows[:limit]
+
+    async def search_page(self, query: str) -> str:
+        """The results, or the reason there are none -- which is always the same
+        reason.
+
+        "Nothing matches" has to be the answer for a word that is in no page
+        and for a word that is only in a page this reader may not open. Saying
+        "3 results you cannot see" would turn the search box into an oracle
+        over the whole wiki, which is the thing `missing_body` is careful about
+        one route along.
+        """
+        terms = (query or "").strip()
+        box = ("<form class=find action='" + RESERVED + "search' role=search>"
+               f"<input name=q type=search autofocus value=\"{html.escape(terms)}\" "
+               "aria-label='Search this wiki'></form>")
+        if not terms:
+            return self.shell("Search", f"<h1>Search</h1>{box}", "", None)
+
+        rows = await self.search(terms)
+        if not rows:
+            body = (f"<h1>Search</h1>{box}"
+                    "<p>Nothing here matches that.</p>")
+            return self.shell("Search", body, "", None)
+
+        items = []
+        for row in rows:
+            display = naming.to_display(row["path"])
+            state = (f" <span class=state>{html.escape(row['state'])}</span>"
+                     if row.get("state") else "")
+            items.append(
+                f'<li><div class=where><a href="/{html.escape(display)}">'
+                f"{html.escape(display)}</a>{state}</div>"
+                f"<p class=excerpt>{excerpt_html(row.get('excerpt') or '')}</p></li>")
+        body = (f"<h1>Search</h1>{box}"
+                f"<ol class=results>{''.join(items)}</ol>")
+        return self.shell("Search", body, "", None)
+
     async def index(self) -> str:
         rows = sorted(await self.outline(), key=lambda r: r["path"])
         items = []
@@ -391,8 +517,12 @@ class Pages:
 
     # -- routing -----------------------------------------------------------
 
-    async def respond(self, route: str) -> tuple[int, str, bytes]:
+    async def respond(self, route: str, query: str = "") -> tuple[int, str, bytes]:
         """One GET, as (status, content type, body).
+
+        `query` is the raw query string, unparsed, because exactly one route
+        wants it and handing the rest of them a parsed dict would invite the
+        others to grow options nobody asked for.
 
         Shared so that a link that works in the preview works in the server.
         Note what it does not take: a method. Deciding that only GET and HEAD
@@ -400,6 +530,10 @@ class Pages:
         routing, so that read-only is a property of the server rather than a
         claim about which routes happen to exist today.
         """
+        if route == RESERVED + "search":
+            terms = urllib.parse.parse_qs(query).get("q", [""])[0]
+            return 200, HTML, (await self.search_page(terms)).encode()
+
         if route == RESERVED + "changed":
             if not self._live_reload:
                 return 404, TEXT, b"no such thing\n"

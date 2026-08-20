@@ -100,6 +100,41 @@ def test_the_reserved_prefix_is_not_a_document(preview):
 
 
 # ---------------------------------------------------------------------------
+# Search, including the half only a preview has
+# ---------------------------------------------------------------------------
+
+def test_the_preview_can_be_searched(preview):
+    r = get(preview, "/-/search?q=onboarding")
+    assert r.code == 200
+    assert "engineering/onboarding" in r.body
+
+
+def test_an_unpublished_draft_is_searchable_here(preview, mount, clean):
+    """The half the server does not have, and the reason `Pages` takes the
+    same `drafts` flag search does. Your own unfinished work is yours; a
+    preview that could not find it would send you back to grep."""
+    (mount / "engineering/onboarding.md").write_text("# Onboarding\n\nmarmosets\n")
+    wait_for(lambda: clean.count("select count(*) from wiki.draft") == 1,
+             what="the draft")
+    r = wait_for(lambda: get(preview, "/-/search?q=marmosets"),
+                 what="the results")
+    assert "engineering/onboarding" in r.body
+    assert "draft" in r.body
+
+
+def test_the_draft_wins_over_the_published_copy(preview, mount, clean):
+    """A draft is what its author sees in the mount, on the page and in
+    `fswiki status`. Search listing the page twice, or listing the published
+    text, would be search disagreeing with everything else."""
+    (mount / "engineering/onboarding.md").write_text("# Onboarding\n\nmarmosets\n")
+    wait_for(lambda: clean.count("select count(*) from wiki.draft") == 1,
+             what="the draft")
+    body = wait_for(lambda: get(preview, "/-/search?q=onboarding"),
+                    what="the results").body
+    assert body.count('href="/engineering/onboarding"') == 1
+
+
+# ---------------------------------------------------------------------------
 # Drafts: the reason this exists at all
 # ---------------------------------------------------------------------------
 
@@ -363,10 +398,22 @@ def test_every_page_says_whose_view_it_is(borrowed):
     """On every page, not on a status screen somebody has to think to visit.
     The whole failure mode of impersonation is forgetting you are doing it."""
     base, _ = borrowed
-    for route in ("/", "/public/welcome", "/no/such/page"):
+    for route in ("/", "/public/welcome", "/no/such/page", "/-/search?q=welcome"):
         body = get(base, route).body
         assert "viewing as bob" in body, route
         assert "read-only" in body, route
+
+
+def test_search_works_while_impersonating(borrowed):
+    """`wiki.search` is declared volatile for exactly this. Impersonation
+    refuses a read-only transaction so it can always write its own log, and
+    PostgREST runs a stable function read-only -- so a stable `search` would
+    have been unreachable to the one caller who most needs their view to match
+    somebody else's. See runtime/078_search.sql."""
+    base, _ = borrowed
+    r = get(base, "/-/search?q=welcome")
+    assert r.code == 200
+    assert "public/welcome" in r.body
 
 
 def test_it_shows_the_subjects_wiki_and_not_the_actors(borrowed, stack):

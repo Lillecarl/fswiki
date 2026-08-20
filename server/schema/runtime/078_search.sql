@@ -69,7 +69,15 @@ returns table (
   rank         real,
   excerpt      text
 )
-language sql stable security definer parallel safe
+-- `volatile` rather than `stable`, and it is a transport decision rather than
+-- a claim about the body -- nothing here writes. PostgREST runs a stable
+-- function in a read-only transaction, and impersonation refuses any
+-- transaction it cannot write its own log into, so a stable `search` would be
+-- unreachable to exactly the caller who most needs their view of the wiki to
+-- match somebody else's. The alternative is a volatile twin beside a stable
+-- one, which is what `changed()` and `acting_as()` are; one endpoint that
+-- always works is the better bargain for a function this new.
+language sql volatile security definer parallel safe
 set search_path = wiki, public, pg_temp
 -- `websearch_to_tsquery` raises a NOTICE when a query holds no lexemes, which
 -- is what "" and "the the the" both do. The function already answers those
@@ -142,7 +150,8 @@ returns table (
   rank         real,
   excerpt      text
 )
-language sql stable parallel safe
+-- Volatile for the same transport reason as wiki.search() above.
+language sql volatile parallel safe
 set search_path = wiki, public, pg_temp
 set client_min_messages = warning
 as $$

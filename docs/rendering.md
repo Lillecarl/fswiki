@@ -721,6 +721,5 @@ argument is one the caller gets to make. They are two grants instead.
   renderer worth having is a subprocess, and a subprocess in a read path is a
   sandbox, a timeout and a concurrency cap. Maths turned out not to need any of
   that; see above.
-- **Search.** A different problem that happens to also read every document.
 - **Themes.** Nothing about them is hard; nothing about them is interesting
   until there is a second reader.

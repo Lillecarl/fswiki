@@ -150,7 +150,8 @@ class Application:
     async def _respond(self, scope: dict) -> tuple[int, str, bytes]:
         pages, client = self.pages_for(token_from(scope.get("headers", [])))
         try:
-            return await pages.respond(scope["path"])
+            return await pages.respond(
+                scope["path"], scope.get("query_string", b"").decode("latin-1"))
         except Unreachable:
             # 502 rather than 500: this server is fine, the one behind it is
             # not, and saying so is the difference between "we are broken" and

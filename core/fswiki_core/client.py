@@ -310,6 +310,24 @@ class Client:
         rows = self._rows(r)
         return rows[0] if rows else None
 
+    async def search(self, query: str, *, limit: int = 20,
+                     drafts: bool = False) -> list[dict]:
+        """Ranked matches for `query`, filtered by whatever this caller may read.
+
+        Always the RPC form, with no GET beside it. `wiki.search` is declared
+        volatile so that one endpoint serves an impersonated caller too -- see
+        the head of runtime/078_search.sql -- which is also why this needs
+        none of `_reading`'s two-transport dance.
+
+        `drafts=True` asks the other function, which returns the caller's own
+        unpublished work and nobody else's. It is for the preview; the server
+        never asks.
+        """
+        rpc = "search_drafts" if drafts else "search"
+        r = await self._http.post(f"/rpc/{rpc}",
+                                  json={"p_query": query, "p_limit": limit})
+        return self._rows(r)
+
     # -- drafts ------------------------------------------------------------
 
     async def drafts(self) -> list[dict]:
