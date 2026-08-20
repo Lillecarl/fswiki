@@ -36,10 +36,28 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 ISSUER = "https://idp.test"
+FUSE_T_HELPER = Path("/Library/Application Support/fuse-t/bin/go-nfsv4")
 
 # Long enough for a mount's poll plus a shipper interval; short enough that a
 # genuine failure does not look like a hang.
 SETTLE = 15.0
+
+
+def _fuse_t_helper() -> Path:
+    return Path(os.environ.get("FUSE_NFSSRV_PATH", FUSE_T_HELPER))
+
+
+def pytest_collection_modifyitems(config, items) -> None:
+    """Do not start any mount test when macOS has no FUSE-T runtime."""
+    if sys.platform != "darwin" or os.access(_fuse_t_helper(), os.X_OK):
+        return
+    unavailable = pytest.mark.skip(
+        reason=f"FUSE-T is not installed; expected an executable helper at "
+               f"{_fuse_t_helper()}"
+    )
+    for item in items:
+        if item.get_closest_marker("mount") is not None:
+            item.add_marker(unavailable)
 
 
 # ---------------------------------------------------------------------------
@@ -558,6 +576,12 @@ def mount_factory(stack, tmp_path_factory):
     """
     _require("fswiki-mount", *(("diskutil",) if sys.platform == "darwin"
                                else ("fusermount3",)))
+    if sys.platform == "darwin":
+        helper = _fuse_t_helper()
+        if not os.access(helper, os.X_OK):
+            pytest.skip(
+                f"FUSE-T is not installed; expected an executable helper at {helper}"
+            )
     if sys.platform != "darwin" and not os.path.exists("/dev/fuse"):
         # A build sandbox has null, zero, random, tty and little else in /dev,
         # and no amount of unsharing conjures a device node that is not there.
