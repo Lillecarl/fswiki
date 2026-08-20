@@ -32,7 +32,10 @@ from typing import Protocol, runtime_checkable
 #      unwrapped -- the text rendered, unstruck, with nothing to indicate it.
 #   4: and MathML, which is foreign content and was therefore being dropped
 #      whole -- 206 bytes of it in, 0 out. See render.maths.
-PIPELINE_VERSION = 4
+#   5: frontmatter is stripped before the backend sees the text, so a leading
+#      `---` block stops rendering as a rule and a paragraph of keys. See
+#      render.frontmatter.
+PIPELINE_VERSION = 5
 
 
 @runtime_checkable

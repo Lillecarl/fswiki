@@ -36,6 +36,7 @@ python3Packages.buildPythonPackage {
     "fswiki_core" "fswiki_core.client" "fswiki_core.naming" "fswiki_core.merge"
     "fswiki_core.render" "fswiki_core.render.links" "fswiki_core.render.registry"
     "fswiki_core.render.maths" "fswiki_core.render.highlight"
+    "fswiki_core.render.frontmatter"
     "fswiki_core.pages"
   ];
 

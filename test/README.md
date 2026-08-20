@@ -44,7 +44,7 @@ The mount tests are marked, and they are marked precisely so that this works.
 
     nix build --file . tests.check -L
 
-519 tests, about forty seconds, entirely inside a pure Nix build. That is
+707 tests, about a minute, entirely inside a pure Nix build. That is
 every pure unit below, plus the client, the SQL suite, the audit trail over
 HTTP and impersonation over HTTP. Two skip themselves there: the filesystem
 under the build's `$TMPDIR` may not carry user extended attributes, and
@@ -84,6 +84,7 @@ Pure units first — no stack, no network, no mount, milliseconds each:
 | `test_report.py` | every word the CLI prints |
 | `test_audit_queue.py` | the audit queue as a queue: cap, batching, recovery |
 | `test_render.py` | the render seam, against every registered backend |
+| `test_render_frontmatter.py` | what a document may ask for, and what it may never reach |
 
 Then against a live stack:
 

@@ -387,11 +387,60 @@ do not even share a capture vocabulary — sql says `conditional`, diff says
 The engine is behind one function, so this stays a swap rather than a rewrite
 if the argument changes. Issue #9 has the full comparison.
 
+### Frontmatter, and why it is parsed before the backend
+
+A markdown document may open with a fenced block, and it gets one key:
+
+    ---
+    layout: wide
+    ---
+
+reStructuredText uses its own docinfo — `:layout: wide` — because rST has
+carried document metadata since long before this project and giving it a
+second mechanism would be perverse. `render.frontmatter.split()` returns
+`(options, text)` and every entry point calls it.
+
+**Before the backend, not inside it.** The backend protocol is
+`to_html(text) -> str`. Widening it to return metadata would touch every
+engine and change what the cache key means, and a `---` block that reaches a
+markdown engine renders as a horizontal rule followed by a paragraph of keys.
+So the pipeline gained a step at the front rather than a wider middle.
+
+**It is a security surface.** One person writes the frontmatter and another
+reads the page it shapes, which is the sentence that governs the sanitiser
+too — except `render.safety` cleans the *body*, and the shell is composed
+afterwards. So nothing from a document reaches an attribute, a class name or
+a stylesheet. The defence is the return type: `Options` is a frozen dataclass
+with one field holding one of two values fixed in the source, and
+`pages.LAYOUT` maps that value to markup this repository wrote. A key nobody
+knows is not rejected with a message; it has nowhere to go.
+
+**The banner is the hard no.** `Pages.shell()` puts "viewing as X · read-only"
+on every impersonated page because the whole failure mode of impersonation is
+forgetting you are doing it. No frontmatter suppresses it, and
+`test/test_render_frontmatter.py` drives the shell with ten hostile documents
+to say so.
+
+**Nothing may cost a reader their content.** A document that opens with a
+horizontal rule looks exactly like frontmatter from the first line, so the
+block is all or nothing: one line that is not `key: value` disqualifies it and
+the text comes back untouched. Swallowing a paragraph would be a far worse bug
+than ignoring a `layout:`.
+
+There is no YAML parser. `layout: wide` is the whole grammar, and a real one
+would additionally accept anchors, aliases, tags, nesting and multi-document
+streams — every one of which this code would then discard.
+
+Caching is unaffected. Frontmatter is part of the content, so
+`(document_id, version, renderer)` still names one output. The split runs
+outside the cached part, because the cache stores HTML and the shell needs
+the options on a hit as much as on a miss.
+
 ### The renderer is part of the cache key
 
 `Rendered.renderer` identifies the whole pipeline, not just the engine:
 
-    markdown-it-py/4.2.0+cfg91b4fb2e+fswiki4
+    markdown-it-py/4.2.0+cfg91b4fb2e+fswiki5
 
 That goes in the cache key beside `(document_id, version)`. Leave it out and
 switching engines — or upgrading one — quietly serves output that the code now

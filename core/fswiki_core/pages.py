@@ -24,6 +24,7 @@ import html
 
 from . import naming, render
 from .client import Client, PostgrestError, Unreachable
+from .render.frontmatter import Options
 
 # Everything a server owns lives under this prefix, so it can never collide
 # with a document path. The same reservation render.links makes.
@@ -57,6 +58,11 @@ body {
   -webkit-text-size-adjust: 100%;
 }
 a { color: var(--link); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+
+/* The one layout beyond the default. A document asks for it by name and this
+   file decides what the name means -- the value never becomes a width, a
+   class or a property. See render.frontmatter and issue #5. */
+body.wide { --measure: 62rem; }
 
 header {
   display: flex; justify-content: space-between; align-items: baseline;
@@ -175,6 +181,13 @@ RELOAD = """
 
 
 
+#: What each layout does to the shell, written here rather than taken from the
+#: document. A layout name that is missing from this map renders as the
+#: default, so adding one to `frontmatter.LAYOUTS` without a rule for it is
+#: harmless rather than an injection point.
+LAYOUT = {"default": "", "wide": " class=wide"}
+
+
 def missing_body(path: str) -> str:
     """Why there is nothing here -- which must not say which reason.
 
@@ -218,15 +231,30 @@ class Pages:
 
     # -- the shell ---------------------------------------------------------
 
-    def shell(self, title: str, body: str, path: str, state: str | None) -> str:
+    def shell(self, title: str, body: str, path: str, state: str | None,
+              options: Options | None = None) -> str:
+        """The page around the body, including what the document asked for.
+
+        `options` is the allowlisted frontmatter, and it reaches exactly one
+        thing: which of `LAYOUT` this page uses. It cannot reach the banner.
+        That is deliberate and it is tested: the whole failure mode of
+        impersonation is forgetting you are doing it, so a page that could
+        suppress "viewing as X" could make another person's wiki look like
+        your own -- and pages are written by whoever may write them, not by
+        the person reading. See render.frontmatter.
+        """
         crumb = html.escape(naming.to_display(path)) if path else "Contents"
+        # The banner is composed from `self._banner`, which came from whatever
+        # built this object, and from nothing in `options`.
         banner = (f"<div class=acting>viewing as {html.escape(self._banner)}"
                   f" &middot; read-only</div>" if self._banner else "")
         reload_script = f"<script>{RELOAD}</script>" if self._live_reload else ""
+        layout = LAYOUT.get((options or Options()).layout, "")
         return (
             "<!doctype html><html><head><meta charset=utf-8>"
             f"<meta name=viewport content='width=device-width,initial-scale=1'>"
-            f"<title>{html.escape(title)}</title><style>{STYLE}</style></head><body>"
+            f"<title>{html.escape(title)}</title><style>{STYLE}</style></head>"
+            f"<body{layout}>"
             f"{banner}"
             f"<header><a class=brand href='/'>fswiki</a>"
             f"<span class=state>{crumb}{' &middot; ' + html.escape(state) if state else ''}"
@@ -297,8 +325,14 @@ class Pages:
             content_type = row.get("content_type") or "text/markdown"
             state = f"revision {row.get('version')}"
 
+        # Split here rather than inside `_body`, because `_body` can skip the
+        # render entirely on a cache hit and the cache stores HTML. The
+        # document's own text is in hand either way, so this costs one string
+        # comparison on the hot path. See render.frontmatter.
+        options, source = render.frontmatter.split(text, content_type)
+
         try:
-            neutral = self._body(text, content_type,
+            neutral = self._body(source, content_type,
                                  None if draft is not None else row)
         except (render.UnknownBackend, render.safety.SanitiserUnavailable) as exc:
             return 500, self.shell("Cannot render", f"<p>{html.escape(str(exc))}</p>",
@@ -309,7 +343,8 @@ class Pages:
             neutral,
             lambda target: "/" + naming.to_display(target) if target in visible else None,
         )
-        return 200, self.shell(naming.to_display(path), body, path, state)
+        return 200, self.shell(naming.to_display(path), body, path, state,
+                               options)
 
     def _body(self, text: str, content_type: str, row: dict | None) -> str:
         """The rendered body with its links still neutral, cached where it can be.

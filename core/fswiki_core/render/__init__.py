@@ -3,11 +3,11 @@
     >>> from fswiki_core import render
     >>> page = render.render("# Hi\n\nsee [[public/welcome]]")
     >>> page.renderer
-    'markdown-it-py/4.2.0+cfg91b4fb2e+fswiki4'
+    'markdown-it-py/4.2.0+cfg91b4fb2e+fswiki5'
 
-The pipeline is three steps and only the middle one is pluggable:
+The pipeline is four steps and only one of them is pluggable:
 
-    [[wikilinks]] -> backend.to_html() -> sanitise
+    frontmatter -> [[wikilinks]] -> backend.to_html() -> sanitise
 
 `page.renderer` identifies the whole pipeline, not just the backend, and it
 belongs in any cache key alongside `(document_id, version)`. Those three name
@@ -27,7 +27,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from . import builtin as _builtin  # noqa: F401 - registers the shipped backends
-from . import cache, highlight, links, safety
+from . import cache, frontmatter, highlight, links, safety
 from .registry import (
     PIPELINE_VERSION,
     Backend,
@@ -39,8 +39,9 @@ from .registry import (
 )
 
 __all__ = [
-    "Backend", "Rendered", "UnknownBackend", "available", "cache", "get",
-    "highlight", "links", "register", "render", "renderer_id", "safety",
+    "Backend", "Rendered", "UnknownBackend", "available", "cache",
+    "frontmatter", "get", "highlight", "links", "register", "render",
+    "renderer_id", "safety",
 ]
 
 
@@ -52,6 +53,10 @@ class Rendered:
     #: `<backend>/<version>+cfg<options>+fswiki<pipeline>`. The cache key.
     renderer: str
     content_type: str
+    #: What the document asked for its shell, allowlisted down to what
+    #: `frontmatter.Options` can hold. Not part of the HTML, and not cached
+    #: with it -- see `pages.Pages.page`.
+    options: frontmatter.Options = frontmatter.Options()
 
     @property
     def unresolved_links(self) -> int:
@@ -67,6 +72,9 @@ def render(text: str, *, content_type: str = "text/markdown",
     preferred backend for the content type.
     """
     chosen = get(content_type, backend)
+    # Before the backend, so a `---` block does not render as a horizontal
+    # rule and a paragraph of keys. The backend protocol stays `str -> str`.
+    options, text = frontmatter.split(text, content_type)
     # One page, one colouring budget. Without it nothing bounds a document:
     # the per-block cap says nothing about how many blocks there are, and 200
     # of them at the cap is 8.7 seconds. See render.highlight.PAGE_BUDGET.
@@ -76,6 +84,7 @@ def render(text: str, *, content_type: str = "text/markdown",
         html=html,
         renderer=_renderer_id(chosen),
         content_type=content_type,
+        options=options,
     )
 
 
