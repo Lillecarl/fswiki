@@ -178,6 +178,13 @@ select wiki_test.expect_eq('anon may execute exactly the self-only forms',
         -- reads only the request headers; the block below is what stops those
         -- headers being worth anything without an account.
         'pre_request()',
+        -- Full-text search. SECURITY DEFINER, so it reads content as the
+        -- owner and then applies `read` by hand -- see runtime/078_search.sql
+        -- for why, and 100_search_test.sql for the cross-product comparison
+        -- that holds the hand-applied copy to the policy it copies. Takes no
+        -- principal, so an anonymous caller can only ever ask what `public`
+        -- may find. `search_drafts` is deliberately not here.
+        'search(p_query text, p_limit integer)',
         -- The browser read. Gated on `read` through current_document, takes
         -- no principal, and writes no audit row for a caller with no account.
         'view_document(p_document uuid, p_event jsonb)']);
