@@ -1,4 +1,6 @@
-{ pkgs ? import <nixpkgs> { } }:
+{
+  pkgs ? import <nixpkgs> { },
+}:
 
 # The test runner, as a program rather than a shell full of instructions.
 #
@@ -16,6 +18,11 @@ let
   fswiki-cli = pkgs.callPackage ../cli { };
   fswiki-fuse = pkgs.callPackage ../fuse { };
   fswiki-server = pkgs.callPackage ../server { };
+  pyfuse3 =
+    if pkgs.stdenv.hostPlatform.isDarwin then
+      pkgs.callPackage ../nix/fuse-t/pyfuse3-t.nix { }
+    else
+      pkgs.python3Packages.pyfuse3;
 
   python = pkgs.python3.withPackages (ps: [
     ps.pytest
@@ -31,7 +38,7 @@ let
     # lookup-count protocol -- and imports pyfuse3 for one constant. Importing
     # it does not open /dev/fuse, so it works in the sandbox; only mounting
     # needs the device.
-    ps.pyfuse3
+    pyfuse3
     fswiki-core
     # The browser-facing server. Unlike the mount and the CLI it is imported
     # in-process rather than run as a subprocess, so it goes in the test
@@ -64,6 +71,8 @@ let
       # fswiki-serve, for the end-to-end test that runs the real program
       # rather than importing its pieces.
       fswiki-server
+    ]
+    ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
       # getfattr, for the xattrs the mount exposes.
       pkgs.attr
       # fusermount3 is setuid and must come from the system; see fuse/default.nix
@@ -148,20 +157,23 @@ let
   # node that is not there, so the mount tests cannot run in a build at all.
   # `-m 'not mount'` is exactly the line between the two, and that is what the
   # marker is for.
-  check = pkgs.runCommand "fswiki-check" {
-    nativeBuildInputs = [ runner ];
-    src = lib.cleanSource ../.;
-    # httpx builds a default SSL context even for an http:// URL, and looking
-    # for a CA bundle that is not there fails with a bare FileNotFoundError
-    # from ssl.py -- nothing to do with this suite, but it takes out every test
-    # that uses the client.
-    SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
-  } ''
-    export FSWIKI_ROOT=$src
-    export HOME=$TMPDIR
-    fswiki-test -m 'not mount' -p no:cacheprovider
-    touch $out
-  '';
+  check =
+    pkgs.runCommand "fswiki-check"
+      {
+        nativeBuildInputs = [ runner ];
+        src = lib.cleanSource ../.;
+        # httpx builds a default SSL context even for an http:// URL, and looking
+        # for a CA bundle that is not there fails with a bare FileNotFoundError
+        # from ssl.py -- nothing to do with this suite, but it takes out every test
+        # that uses the client.
+        SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+      }
+      ''
+        export FSWIKI_ROOT=$src
+        export HOME=$TMPDIR
+        fswiki-test -m 'not mount' -p no:cacheprovider
+        touch $out
+      '';
 in
 # The runner is the default -- `nix run --file . tests` -- with the sandboxed
 # build hanging off it as `tests.check`.

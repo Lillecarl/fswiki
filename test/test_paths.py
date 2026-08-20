@@ -86,7 +86,7 @@ def test_a_real_file_beats_every_guess(tmp_path):
     f.write_text("x")
     try:
         os.setxattr(f, paths.XATTR_PATH, b"root.somewhere.else")
-    except OSError as exc:
+    except (OSError, AttributeError) as exc:
         pytest.skip(f"no user xattrs on {tmp_path}: {exc}")
     assert paths.from_xattr(str(f)) == "root.somewhere.else"
     # And it wins: the filename would have said `root.anything-at-all`.
@@ -98,7 +98,7 @@ def test_an_empty_xattr_is_treated_as_absent(tmp_path):
     f.write_text("x")
     try:
         os.setxattr(f, paths.XATTR_PATH, b"")
-    except OSError as exc:
+    except (OSError, AttributeError) as exc:
         pytest.skip(f"no user xattrs on {tmp_path}: {exc}")
     assert paths.from_xattr(str(f)) is None
 

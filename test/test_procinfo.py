@@ -25,6 +25,10 @@ import pytest
 from fswiki_fuse import procinfo
 
 SECRET = "hunter2-do-not-ship-this"
+pytestmark = pytest.mark.skipif(
+    not os.path.isdir("/proc/self"),
+    reason="process audit metadata is read from Linux procfs",
+)
 
 
 @pytest.fixture
