@@ -44,7 +44,7 @@ The mount tests are marked, and they are marked precisely so that this works.
 
     nix build --file . tests.check -L
 
-802 tests, about two minutes, entirely inside a pure Nix build. That is
+815 tests, about eighty seconds, entirely inside a pure Nix build. That is
 every pure unit below, plus the client, the SQL suite, the audit trail over
 HTTP and impersonation over HTTP. Two skip themselves there: the filesystem
 under the build's `$TMPDIR` may not carry user extended attributes, and
@@ -93,7 +93,7 @@ Then against a live stack:
 | `test_backends.py` | the client under both asyncio and trio |
 | `test_client.py` | reading, and never from `current_document` |
 | `test_search.py` | what a reader finds, and what search must never tell them |
-| `test_attachments.py` | bytes with a path, and what a browser is told about them |
+| `test_attachments.py` | a file as a revision, and what a browser is told about one |
 | `test_client_drafts.py` | drafts, push, revisions and the merge RPCs |
 | `test_client_transport.py` | the transport impersonation forces, and how it fails |
 | `test_sql.py` | the in-database suite, in a database of its own |
@@ -112,6 +112,7 @@ And through a real mount:
 
 | file | what it covers |
 | --- | --- |
+| `test_mount_binary.py` | a picture through the mount, byte for byte |
 | `test_mount.py` | the filesystem itself |
 | `test_merge.py` | the three-way merge, end to end through the mount |
 | `test_mount_audit.py` | `fswiki-mount --audit`, including offline spooling |

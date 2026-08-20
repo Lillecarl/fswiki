@@ -127,11 +127,11 @@ select wiki_test.expect_eq('anon may select exactly the read path',
      from pg_class c join pg_namespace n on n.oid = c.relnamespace
     where n.nspname = 'wiki' and c.relkind in ('r', 'v')
       and has_table_privilege('fswiki_anon', c.oid, 'select')),
-  array[-- The bytes of an attachment, under a policy that is document_version's
-        -- with a different table name: `read` on the document it is. A public
-        -- page with a picture on it is a public page.
-        'attachment',
-        'current_document', 'document', 'document_version',
+  array['current_document', 'document', 'document_version',
+        -- The names of the places a body can live. Not a secret, and a client
+        -- needs it to know whether `storage` on a row means it can fetch the
+        -- bytes itself. Holds no path, no principal and no credential.
+        'storage_backend',
         'syncable_document']);
 
 select wiki_test.expect_eq('anon may not write anything, anywhere',
@@ -165,10 +165,6 @@ select wiki_test.expect_eq('anon may execute exactly the self-only forms',
         -- current_document exposes `capabilities`, which is one question per
         -- capability per row. Same shape, same self-only rule.
         'acl_contexts()',
-        -- One attachment's bytes by path. SECURITY INVOKER over both tables,
-        -- so a file anon may not read is a file that is not there -- and it
-        -- takes a path rather than a principal.
-        'attachment_at(p_path ltree)',
         'can(p_path ltree, p_is_folder boolean, p_owner uuid, p_cap wiki.capability)',
         -- Reads no table. It answers from the context it is handed, so a
         -- caller who invents one learns only what their invention says.

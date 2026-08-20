@@ -73,6 +73,10 @@ def merge_outcome(row: dict, draft: dict | None = None) -> str | None:
                       "independently")
     if draft is None:
         return None
+    if draft.get("content_bytes") is not None:
+        # Bytes have no three-way merge. Saying so is the useful answer; a
+        # merge of two pictures would be neither.
+        return yellow("a file — take yours or theirs, there is nothing to merge")
 
     merged = merge3way.merge(base, draft.get("content") or "", theirs)
     if merged.redundant:
@@ -175,6 +179,16 @@ def render_diff(entries: list[tuple[dict, str | None]]) -> str:
             continue
         if operation == "move":
             chunks.append(yellow(f"~~~ {display}  (moved here)"))
+            continue
+
+        if draft.get("content_bytes") is not None:
+            # A diff of bytes is noise. The sizes are what a person can act on:
+            # they say whether the file changed and by how much.
+            was = len(published.encode("utf-8")) if published else 0
+            now = len(draft["content_bytes"])
+            chunks.append(yellow(
+                f"~~~ {display}  (a file, {was} bytes -> {now})"
+                if was else f"+++ {display}  (a file, {now} bytes)"))
             continue
 
         new_text = draft.get("content") or ""
@@ -285,6 +299,11 @@ def _lost(draft: dict, published: str | None) -> str:
         return "the retirement is cancelled; the page stays published"
     if operation == "move":
         return "the move is cancelled; the page stays where it is"
+
+    if draft.get("content_bytes") is not None:
+        n = len(draft["content_bytes"])
+        return (f"{n} byte{'s' if n != 1 else ''} of a file, "
+                f"{'published nowhere else' if operation == 'create' else 'unpublished'}")
 
     text = draft.get("content") or ""
     if operation == "create" or published is None:

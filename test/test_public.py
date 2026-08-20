@@ -78,7 +78,10 @@ def test_the_browser_read_serves_it(published, rest):
     r = rest("/rpc/view_document", user=None, method="POST",
              body={"p_document": published})
     assert r.code == 200, r.body
-    assert json.loads(r.body) == [{"content": "Public notice."}]
+    # Two columns, because a revision has two kinds of body and this function
+    # serves whichever it is. Exactly one is ever set; a page's is the text.
+    assert json.loads(r.body) == [{"content": "Public notice.",
+                                   "content_bytes": None}]
 
 
 def test_a_page_it_may_not_read_is_a_page_that_is_not_there(stack, rest):

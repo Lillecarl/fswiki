@@ -23,6 +23,15 @@ _SLUG_RE = re.compile(r"^[^./\\\s]+$")
 
 # Extension by content type, and the reverse. The first entry for a type wins
 # when going from type to extension.
+#
+# One map, holding both kinds of body. It was two for as long as an attachment
+# was a row in a table of its own: `parse_filename` decides what a file written
+# into the mount *means*, and while the mount could not carry bytes, a
+# `logo.png` saved into a directory had to stay scratch rather than become a
+# document claiming to be an image with text in it.
+#
+# A file is a revision now, so writing one into the mount is exactly as
+# meaningful as writing a page, and the split had nothing left to protect.
 _EXTENSIONS: tuple[tuple[str, str], ...] = (
     ("text/markdown", ".md"),
     ("text/plain", ".txt"),
@@ -31,32 +40,18 @@ _EXTENSIONS: tuple[tuple[str, str], ...] = (
     ("application/json", ".json"),
     ("text/csv", ".csv"),
     ("text/yaml", ".yaml"),
-)
-
-EXT_BY_TYPE: dict[str, str] = {}
-for _type, _ext in _EXTENSIONS:
-    EXT_BY_TYPE.setdefault(_type, _ext)
-
-TYPE_BY_EXT: dict[str, str] = {ext: typ for typ, ext in _EXTENSIONS}
-
-DEFAULT_CONTENT_TYPE = "text/markdown"
-
-# Media types an attachment may be served under, and the extension each shows.
-#
-# A separate map from the one above, and that is not tidiness. `_EXTENSIONS`
-# holds *document* content types, and `parse_filename` uses it to decide what a
-# file written into the mount means. Put `.png` in there and a `logo.png`
-# saved into a directory becomes a document claiming to be an image, with text
-# in it. A binary file appearing in the mount must stay scratch until the FUSE
-# driver can carry bytes.
-#
-# The list is short on purpose. It is what a browser is asked to display or
-# download, so every entry is a decision; `fswiki_core.pages.INLINE` narrows it
-# again to what may render in the page rather than download.
-_ATTACHMENT_EXTENSIONS: tuple[tuple[str, str], ...] = (
+    # Binary from here down. The list is short on purpose: every entry is a
+    # type a browser will be asked to display or download, so each one is a
+    # decision. `fswiki_core.pages.INLINE` narrows it again to what may render
+    # inside a page rather than download.
     ("image/png", ".png"),
+    # One extension per type, and no aliases. `.jpeg` is missing on purpose:
+    # with both, `photo.jpeg` would parse to image/jpeg and print back as
+    # `photo.jpg`, and the mount would appear to rename somebody's file after
+    # a refresh. test_naming.py asserts the round trip for every entry here,
+    # which is what caught it. A name we do not recognise stays scratch, which
+    # is the documented and survivable answer.
     ("image/jpeg", ".jpg"),
-    ("image/jpeg", ".jpeg"),
     ("image/gif", ".gif"),
     ("image/webp", ".webp"),
     ("image/avif", ".avif"),
@@ -67,12 +62,35 @@ _ATTACHMENT_EXTENSIONS: tuple[tuple[str, str], ...] = (
     ("video/mp4", ".mp4"),
 )
 
-ATTACHMENT_EXT_BY_TYPE: dict[str, str] = {}
-for _type, _ext in _ATTACHMENT_EXTENSIONS:
-    ATTACHMENT_EXT_BY_TYPE.setdefault(_type, _ext)
+#: The types whose body is text. Everything else this wiki knows about is
+#: bytes, and the difference decides which column a revision fills, whether a
+#: three-way merge is possible at all, and what the mount hands the kernel.
+#:
+#: An allowlist rather than `startswith("text/")`, because `application/json`
+#: is text and `image/svg+xml` is not, and neither is guessable from the
+#: prefix.
+TEXTUAL: frozenset[str] = frozenset({
+    "text/markdown", "text/plain", "text/html", "text/x-rst",
+    "application/json", "text/csv", "text/yaml",
+})
 
-ATTACHMENT_TYPE_BY_EXT: dict[str, str] = {
-    ext: typ for typ, ext in _ATTACHMENT_EXTENSIONS}
+EXT_BY_TYPE: dict[str, str] = {}
+for _type, _ext in _EXTENSIONS:
+    EXT_BY_TYPE.setdefault(_type, _ext)
+
+TYPE_BY_EXT: dict[str, str] = {ext: typ for typ, ext in _EXTENSIONS}
+
+DEFAULT_CONTENT_TYPE = "text/markdown"
+
+
+def is_binary_type(content_type: str | None) -> bool:
+    """Whether a body of this type is bytes rather than text.
+
+    A type nobody listed is binary, which is the safe direction: text treated
+    as bytes round-trips exactly, and bytes treated as text do not survive the
+    trip at all.
+    """
+    return (content_type or DEFAULT_CONTENT_TYPE) not in TEXTUAL
 
 
 def is_slug(value: str) -> bool:
@@ -112,16 +130,6 @@ def parse_filename(name: str) -> tuple[str, str] | None:
     if content_type is None or not is_slug(slug):
         return None
     return slug, content_type
-
-
-def attachment_filename(slug: str, media_type: str | None) -> str:
-    """What an attachment is called, for a URL and for a download.
-
-    An unknown media type gets no extension rather than a guessed one. The
-    browser is told the type in a header either way, and inventing `.bin` would
-    put a lie in the filename a person saves.
-    """
-    return slug + ATTACHMENT_EXT_BY_TYPE.get(media_type or "", "")
 
 
 def ltree_labels(path: str) -> list[str]:
@@ -181,22 +189,3 @@ def from_display(path: str) -> str:
             raise ValueError(f"{part!r} is not a valid path element")
         labels.append(part)
     return ".".join(["root", *labels])
-
-
-def from_route(path: str) -> str:
-    """A browser URL to a wiki path. `from_display`, plus attachment names.
-
-    Separate because the two callers want different things from an unknown
-    extension. A wikilink to `report.tar.gz` should stay literal text, so
-    `from_display` raises. A *URL* ending in `.png` is somebody asking for a
-    file, and refusing it would mean an attachment could only be linked
-    without the extension a browser and a download both expect.
-
-    Only the extensions this wiki actually serves are stripped, so the two
-    functions still agree that `report.tar.gz` is not a name the wiki holds.
-    """
-    head, _, tail = path.replace("\\", "/").rpartition("/")
-    stem, dot, ext = tail.rpartition(".")
-    if dot and ("." + ext) in ATTACHMENT_TYPE_BY_EXT and is_slug(stem):
-        tail = stem
-    return from_display(f"{head}/{tail}" if head else tail)

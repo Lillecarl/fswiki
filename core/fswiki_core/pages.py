@@ -424,21 +424,29 @@ class Pages:
         """
         draft = None
         if self._drafts:
+            # A body of either kind. A `delete` or `move` draft has neither
+            # and is not something to render.
             draft = next((d for d in await self._client.drafts()
-                          if d["path"] == path and d.get("content") is not None),
+                          if d["path"] == path
+                          and (d.get("content") is not None
+                               or d.get("content_bytes") is not None)),
                          None)
 
         if draft is not None:
-            text = draft["content"]
             content_type = draft.get("content_type") or "text/markdown"
+            if draft.get("content_bytes") is not None:
+                # Your own unpublished picture, shown the way the published one
+                # would be. The preview exists to show you your work in place.
+                return (200, content_type, draft["content_bytes"])
+            text = draft["content"] or ""
             state = "draft"
         else:
             row = await self._client.document(path)
             if row is None:
                 return self._html(404, self.shell("Not here", missing_body(path),
                                                   path, None))
-            if row.get("is_attachment"):
-                return await self._file(path)
+            if row.get("is_binary"):
+                return self._file(row)
             text = row.get("content") or ""
             content_type = row.get("content_type") or "text/markdown"
             state = f"revision {row.get('version')}"
@@ -468,27 +476,23 @@ class Pages:
     def _html(status: int, markup: str) -> tuple[int, str, bytes]:
         return status, HTML, markup.encode()
 
-    async def _file(self, path: str) -> tuple[int, str, bytes]:
-        """An attachment's bytes, or the same 404 anything else would give.
+    @staticmethod
+    def _file(row: dict) -> tuple[int, str, bytes]:
+        """A binary revision, straight from the row that named it.
 
-        A second request, because `current_document` deliberately does not
-        join to `wiki.attachment`: that table's policy is an ACL walk per row,
-        measured at 0.35 ms, and the view is read by every request -- 138 ms
-        added to a 1,420-row manifest for 400 files. One extra round trip on
-        an image is the cheaper half of that trade.
+        No second request, and that is what folding attachments into
+        `document_version` bought. While the bytes lived in a table of their
+        own, `current_document` could not join to them -- that table's policy
+        was an ACL walk per row, 0.35 ms each, 138 ms on a 1,420-row manifest
+        -- so serving a picture meant fetching the document and then fetching
+        the file. A revision's body travels with the revision.
 
-        The type is narrowed here rather than trusted. The database already
-        refuses a media type that could carry a header, and `INLINE` decides
-        what a browser is allowed to do with it.
+        The type is not narrowed here. The database constrains a content type
+        to something that cannot carry a header, and `attachment_headers`
+        decides what a browser may do with it.
         """
-        found = await self._client.attachment(path)
-        if found is None:
-            # It was there a request ago. Same answer as never having been,
-            # because that is the answer every other read gives.
-            return self._html(404, self.shell("Not here", missing_body(path),
-                                              path, None))
-        return 200, found.get("media_type") or "application/octet-stream", \
-            found.get("bytes") or b""
+        return (200, row.get("content_type") or "application/octet-stream",
+                row.get("content_bytes") or b"")
 
     def _body(self, text: str, content_type: str, row: dict | None) -> str:
         """The rendered body with its links still neutral, cached where it can be.
@@ -637,10 +641,7 @@ class Pages:
 
         wanted = route.lstrip("/")
         try:
-            # from_route, not from_display: a URL ending in `.png` is somebody
-            # asking for a file, where a wikilink ending in `.tar.gz` should
-            # stay literal text. See naming.from_route.
-            path = wanted if naming.looks_like_ltree(wanted) else naming.from_route(wanted)
+            path = wanted if naming.looks_like_ltree(wanted) else naming.from_display(wanted)
         except ValueError:
             return 404, HTML, self.shell(
                 "Not here", "<p>Not a path this wiki can hold.</p>", "", None).encode()

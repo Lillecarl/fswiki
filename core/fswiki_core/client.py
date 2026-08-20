@@ -34,8 +34,8 @@ MANIFEST_COLUMNS = (
 )
 
 DRAFT_COLUMNS = (
-    "id,operation,document_id,path,content,content_type,base_version,updated_at,"
-    "state,merged_from,pre_merge_content"
+    "id,operation,document_id,path,content,content_bytes,content_type,"
+    "base_version,updated_at,state,merged_from,pre_merge_content"
 )
 
 
@@ -262,7 +262,7 @@ class Client:
         return self._rows(r)
 
     async def content(self, document_id: str, *, event: dict | None = None) -> bytes:
-        """The published body of one document.
+        """The published body of one document, as bytes, whichever kind it is.
 
         Through this client's tree: `syncable_document` by default, so a
         document that is readable but not syncable comes back as no rows
@@ -292,14 +292,21 @@ class Client:
         else:
             r = await self._http.get(
                 f"/{self._view}",
-                params={"select": "content", "id": f"eq.{document_id}"},
+                params={"select": "content,content_bytes",
+                        "id": f"eq.{document_id}"},
             )
         rows = self._rows(r)
         if not rows:
             raise LookupError(
                 f"document {document_id} is not in the {self.tree} tree, or is gone")
-        body = rows[0].get("content")
-        return b"" if body is None else body.encode("utf-8")
+        # Whichever kind of body the revision has. Bytes at this boundary
+        # either way: the mount hands the kernel bytes and the renderer
+        # decodes them, so nothing above here had to learn about the split.
+        raw = _unhex(rows[0].get("content_bytes"))
+        if raw is not None:
+            return raw
+        text = rows[0].get("content")
+        return b"" if text is None else text.encode("utf-8")
 
     async def document(self, path: str) -> dict | None:
         """One document by path, with its body, or None if it is not there.
@@ -310,12 +317,17 @@ class Client:
         """
         r = await self._reading(
             f"/{self._view}", "document_at",
-            params={"select": "id,path,content,content_type,version,is_attachment",
+            params={"select": "id,path,content,content_bytes,is_binary,"
+                                 "content_type,version,size",
                     **({} if self.impersonating else {"path": f"eq.{path}"})},
             body={"p_path": path},
         )
         rows = self._rows(r)
-        return rows[0] if rows else None
+        if not rows:
+            return None
+        row = dict(rows[0])
+        row["content_bytes"] = _unhex(row.get("content_bytes"))
+        return row
 
     async def search(self, query: str, *, limit: int = 20,
                      drafts: bool = False) -> list[dict]:
@@ -337,61 +349,46 @@ class Client:
 
     # -- attachments -------------------------------------------------------
 
-    async def attachment(self, path: str) -> dict | None:
-        """One attachment by path, bytes included, or None.
+    async def attach(self, path: str, content_type: str, payload: bytes,
+                     *, message: str | None = None) -> dict:
+        """Publish a binary revision at `path`, creating the document if needed.
 
-        Always the RPC form: `wiki.attachment_at` is volatile so that one
-        endpoint serves an impersonated caller too, the same reasoning as
-        `search`. SECURITY INVOKER, so a file you may not read is a file that
-        is not there -- which is the answer every other read here gives.
-
-        **The bytes arrive hex-encoded**, because PostgREST renders `bytea`
-        the way Postgres does and JSON has no bytes. That doubles them in
-        transit and costs a decode: measured at about 1.5 ms for a 100 kB
-        image and 150 ms at the 10 MiB cap. Accepted rather than split into a
-        second request for a scalar column with
-        `Accept: application/octet-stream`, which would be exact and would
-        also make every image two round trips instead of one. If a wiki ever
-        serves large files often, that is the fix, and it is a change to this
-        method alone.
-        """
-        r = await self._http.post("/rpc/attachment_at", json={"p_path": path})
-        rows = self._rows(r)
-        if not rows:
-            return None
-        row = dict(rows[0])
-        row["bytes"] = _unhex(row.get("bytes"))
-        row["sha256"] = _unhex(row.get("sha256"))
-        return row
-
-    async def attach(self, path: str, media_type: str, payload: bytes) -> dict:
-        """Store or replace an attachment. Returns `{document_id, created, byte_size}`.
+        `wiki.attach` is `ensure_folder` plus `publish_revision`, so this is
+        publishing rather than a side door: the same base-version check, the
+        same history and the same audit trail a page gets.
 
         The size limit is the database's, so a file over it comes back as a
         PostgrestError naming the cap rather than as a refusal this client
-        invented. A client-side check would be a second limit to keep in step,
-        and the one that matters is the one psql also has to obey.
+        invented. A check here would be a second limit to keep in step, and the
+        one that matters is the one psql also has to obey.
+
+        The bytes go out hex-encoded, because PostgREST renders `bytea` the way
+        Postgres does and JSON has no bytes. That doubles them in transit;
+        `Accept: application/octet-stream` on a scalar function is the fix if
+        it ever matters, and it is a change to this module alone.
         """
         r = await self._http.post(
             "/rpc/attach",
-            json={"p_path": path, "p_media_type": media_type,
-                  "p_bytes": "\\x" + payload.hex()})
+            json={"p_path": path, "p_content_type": content_type,
+                  "p_bytes": "\\x" + payload.hex(), "p_message": message})
         rows = self._rows(r)
         return rows[0] if rows else {}
 
-    async def detach(self, path: str) -> bool:
-        """Remove an attachment permanently. False if there was none.
+    async def detach(self, path: str, *, message: str | None = None) -> bool:
+        """Retire a file. False if there was nothing there.
 
-        Permanent, and there is no retire to offer instead: an attachment has
-        no revisions to fall back on. It needs `purge` for that reason.
+        A tombstone revision, not a deletion: a file has history like a page,
+        so this needs `delete` rather than `purge`, and the bytes stay where a
+        page's text would.
         """
-        r = await self._http.post("/rpc/detach", json={"p_path": path})
+        r = await self._http.post("/rpc/detach",
+                                  json={"p_path": path, "p_message": message})
         if r.status_code >= 400:
             raise PostgrestError(r)
         return r.json() is True
 
     async def max_attachment_bytes(self) -> int | None:
-        """The wiki's upload cap, for saying so before a big file is sent."""
+        """The wiki's cap on a binary body, for saying so before sending one."""
         r = await self._http.post("/rpc/max_attachment_bytes", json={})
         if r.status_code >= 400:
             return None
@@ -402,7 +399,8 @@ class Client:
 
     async def drafts(self) -> list[dict]:
         r = await self._reading("/draft", "list_drafts", params={"select": DRAFT_COLUMNS})
-        return self._rows(r)
+        return [dict(row, content_bytes=_unhex(row.get("content_bytes")))
+                for row in self._rows(r)]
 
     async def put_draft(
         self,
@@ -412,6 +410,7 @@ class Client:
         path: str,
         document_id: str | None = None,
         content: str | None = None,
+        content_bytes: bytes | None = None,
         content_type: str | None = None,
         base_version: int | None = None,
         message: str | None = None,
@@ -421,6 +420,10 @@ class Client:
         Upserts on the (author_id, path) unique constraint rather than the
         primary key, because the client thinks in paths and never learns the
         draft's id.
+
+        `content` or `content_bytes`, never both -- the database refuses a
+        draft with two bodies. Which one a caller fills follows from the
+        content type; see `naming.is_binary_type`.
         """
         payload = {
             "author_id": author_id,
@@ -428,6 +431,8 @@ class Client:
             "path": path,
             "document_id": document_id,
             "content": content,
+            "content_bytes": (None if content_bytes is None
+                              else "\\x" + content_bytes.hex()),
             "base_version": base_version,
             "message": message,
         }
@@ -441,7 +446,11 @@ class Client:
             headers={"Prefer": "resolution=merge-duplicates,return=representation"},
         )
         rows = self._rows(r)
-        return rows[0] if rows else {}
+        if not rows:
+            return {}
+        row = dict(rows[0])
+        row["content_bytes"] = _unhex(row.get("content_bytes"))
+        return row
 
     async def revision(self, document_id: str, version: int) -> str | None:
         """The content of one historical revision, or None if it is not there.

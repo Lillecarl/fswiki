@@ -83,7 +83,7 @@ develop holes that depend on what you read earlier. See
 | [`fuse/`](fuse/) | `fswiki-mount`. The tree, on **trio** — pyfuse3's native backend. |
 | [`cli/`](cli/) | `fswiki`. status, diff, push, revert, merge, render, preview. |
 | [`dev/`](dev/) | Real Postgres and PostgREST under process-compose. Nothing is mocked. |
-| [`test/`](test/) | 961 tests against all of it, at 91% of the lines. See [test/README.md](test/README.md). |
+| [`test/`](test/) | 990 tests against all of it, at 91% of the lines. See [test/README.md](test/README.md). |
 
 ## Running it
 
@@ -165,8 +165,8 @@ anything changes.
 ## Testing
 
 ```console
-$ nix build --file . tests.check -L      # 802 tests, ~110s, in a pure build sandbox
-$ nix run --file . tests                 # all 961, if you have /dev/fuse
+$ nix build --file . tests.check -L      # 815 tests, ~80s, in a pure build sandbox
+$ nix run --file . tests                 # all 990, if you have /dev/fuse
 ```
 
 The mount tests need a real `/dev/fuse` and a namespace to mount in;
@@ -199,16 +199,16 @@ measurements that settled them.
   notification bridge must never carry content.
 - [docs/search.md](docs/search.md) — why a text index and a row-level security
   policy want opposite things from the planner, and what that costs.
-- [docs/attachments.md](docs/attachments.md) — why an attachment is a document
-  row, where the size limit lives, and what a browser is told about a file
-  somebody else uploaded.
+- [docs/attachments.md](docs/attachments.md) — why a file is a *revision*,
+  where the size limit lives, what a browser is told about a file somebody else
+  uploaded, and where a storage backend would plug in.
 
 ## Status
 
 Working and used, but early. Notably absent, and deliberately so: any identity
-provider beyond "a JWT with a subject the database recognises", and attachments
-in the mount — they are in the database and in the browser, but a binary file
-that FUSE can carry is its own piece of work.
+provider beyond "a JWT with a subject the database recognises", and any storage
+backend but the database — files live in `document_version` beside the pages,
+and the seam for putting old revisions in a bucket is cut but not filled in.
 
 Requires PostgreSQL 16 or newer — `ltree` labels only accept hyphens and
 non-ASCII from 16 on, and slugs depend on that.

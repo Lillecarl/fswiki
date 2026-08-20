@@ -11,14 +11,19 @@
 -- refuses if the server has moved past it. That check is what makes this safe
 -- to expose directly — a client calling it instead of wiki.push() still cannot
 -- silently overwrite someone else's edit, it just loses the batching.
+-- `p_content_bytes` sits between the text body and the type rather than being
+-- appended, because it is the same argument in a different form: a revision has
+-- one body and this is the other kind it can be. The constraint in tables/150
+-- refuses both at once, so there is no ordering question about which wins.
 create or replace function wiki.publish_revision(
-  p_document     uuid,
-  p_base_version integer,
-  p_path         ltree,
-  p_content      text,
-  p_content_type text,
-  p_message      text,
-  p_tombstone    boolean default false
+  p_document      uuid,
+  p_base_version  integer,
+  p_path          ltree,
+  p_content       text,
+  p_content_bytes bytea,
+  p_content_type  text,
+  p_message       text,
+  p_tombstone     boolean default false
 )
 returns integer
 language plpgsql volatile
@@ -64,10 +69,11 @@ begin
     from wiki.document_version where document_id = p_document;
 
   insert into wiki.document_version
-    (document_id, version, path, content, content_type,
+    (document_id, version, path, content, content_bytes, content_type,
      is_tombstone, message, author_id, parent_version_id)
   values
-    (p_document, v_next, p_path, p_content, coalesce(p_content_type, 'text/markdown'),
+    (p_document, v_next, p_path, p_content, p_content_bytes,
+     coalesce(p_content_type, 'text/markdown'),
      p_tombstone, p_message, v_author, v_prev.id);
 
   return v_next;
@@ -217,9 +223,15 @@ begin
            where dv.document_id = v_doc.id
              and dv.version = d.base_version;
 
+          -- A binary revision leaves server_content and base_content null,
+          -- because there is no text to hand back and no three-way merge to
+          -- run on bytes. The client needs to know that is the reason rather
+          -- than guessing from two nulls.
           v_result.detail := format(
-            'edited from revision %s but the server is at %s',
-            d.base_version, v_live.version);
+            'edited from revision %s but the server is at %s%s',
+            d.base_version, v_live.version,
+            case when v_live.content is null and not v_live.is_tombstone
+                 then '; it is a file, which cannot be merged' else '' end);
         end if;
       end if;
     end if;
@@ -339,17 +351,17 @@ begin
         returning id into v_target;
 
         v_version := wiki.publish_revision(
-          v_target, null, d.path, d.content, d.content_type,
+          v_target, null, d.path, d.content, d.content_bytes, d.content_type,
           coalesce(d.message, p_message), false);
 
       when 'update' then
         v_version := wiki.publish_revision(
-          d.document_id, d.base_version, d.path, d.content, d.content_type,
-          coalesce(d.message, p_message), false);
+          d.document_id, d.base_version, d.path, d.content, d.content_bytes,
+          d.content_type, coalesce(d.message, p_message), false);
 
       when 'delete' then
         v_version := wiki.publish_revision(
-          d.document_id, d.base_version, d.path, null, 'text/markdown',
+          d.document_id, d.base_version, d.path, null, null, 'text/markdown',
           coalesce(d.message, p_message), true);
 
       when 'move' then
@@ -366,9 +378,14 @@ begin
 
         -- The rename is itself a revision, so history records where the
         -- document lived and when.
+        -- A move with no edit carries the live body forward, whichever kind
+        -- it is. `coalesce` per column rather than "the text one or the binary
+        -- one", because a move draft sets neither and an edit sets exactly one.
         v_version := wiki.publish_revision(
           d.document_id, d.base_version, d.path,
-          coalesce(d.content, v_live.content), coalesce(d.content_type, v_live.content_type),
+          coalesce(d.content, v_live.content),
+          coalesce(d.content_bytes, v_live.content_bytes),
+          coalesce(d.content_type, v_live.content_type),
           coalesce(d.message, p_message), false);
 
     end case;
@@ -472,7 +489,7 @@ $$;
 
 grant execute on function
     wiki.push(text, ltree[]),
-    wiki.publish_revision(uuid, integer, ltree, text, text, text, boolean),
+    wiki.publish_revision(uuid, integer, ltree, text, bytea, text, text, boolean),
     wiki.ensure_folder(ltree),
     wiki.nearest_existing_ancestor(ltree),
     wiki.begin_merge(ltree, text, integer, boolean),

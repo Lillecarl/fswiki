@@ -95,42 +95,56 @@ def test_no_filename_is_offered():
 # ---------------------------------------------------------------------------
 
 def test_a_url_may_carry_the_extension():
-    assert naming.from_route("public/logo.png") == "root.public.logo"
+    assert naming.from_display("public/logo.png") == "root.public.logo"
 
 
 def test_and_may_leave_it_off():
-    assert naming.from_route("public/logo") == "root.public.logo"
+    assert naming.from_display("public/logo") == "root.public.logo"
 
 
-def test_a_document_extension_still_works():
-    assert naming.from_route("public/welcome.md") == "root.public.welcome"
+def test_a_binary_extension_now_means_something_in_the_mount():
+    """The two extension maps merged when a file became a revision.
 
-
-def test_an_extension_the_wiki_does_not_serve_is_still_refused():
-    """`from_route` is wider than `from_display`, not unbounded. A name the
-    wiki could never hold stays a name it could never hold."""
-    with pytest.raises(ValueError):
-        naming.from_route("public/report.tar.gz")
-
-
-def test_a_binary_extension_in_the_mount_is_still_scratch():
-    """The reason the two extension maps are separate. `parse_filename` decides
-    what a file written into the mount means, and a `logo.png` saved there must
-    not become a document claiming to be an image with text inside it."""
-    assert naming.parse_filename("logo.png") is None
+    While the mount could not carry bytes, `logo.png` written into a directory
+    had to stay scratch -- otherwise it became a document claiming to be an
+    image with text inside it. Writing one is as meaningful as writing a page
+    now, so the split had nothing left to protect.
+    """
+    assert naming.parse_filename("logo.png") == ("logo", "image/png")
     assert naming.parse_filename("notes.md") == ("notes", "text/markdown")
 
 
+def test_an_extension_the_wiki_does_not_serve_is_still_refused():
+    with pytest.raises(ValueError):
+        naming.from_display("public/report.tar.gz")
+
+
 def test_the_filename_carries_the_type():
-    assert naming.attachment_filename("logo", "image/png") == "logo.png"
-    assert naming.attachment_filename("plan", "application/pdf") == "plan.pdf"
+    assert naming.filename("logo", "image/png", False) == "logo.png"
+    assert naming.filename("plan", "application/pdf", False) == "plan.pdf"
 
 
 def test_an_unknown_type_gets_no_invented_extension():
     """The header says what it is either way. A guessed `.bin` would be a lie
     in the name a person saves."""
-    assert naming.attachment_filename("thing", "application/x-nonsense") == "thing"
-    assert naming.attachment_filename("thing", None) == "thing"
+    assert naming.filename("thing", "application/x-nonsense", False) == "thing"
+
+
+def test_which_bodies_are_bytes():
+    """The one question that decides which column a revision fills, whether a
+    merge is possible, and what the mount hands the kernel."""
+    assert naming.is_binary_type("image/png")
+    assert naming.is_binary_type("image/svg+xml")
+    assert naming.is_binary_type("application/pdf")
+    assert not naming.is_binary_type("text/markdown")
+    assert not naming.is_binary_type("application/json")
+    assert not naming.is_binary_type(None)
+
+
+def test_an_unlisted_type_is_treated_as_bytes():
+    """The safe direction: text treated as bytes round-trips exactly, and bytes
+    treated as text do not survive the trip at all."""
+    assert naming.is_binary_type("application/x-never-heard-of-it")
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +182,7 @@ async def alice(stack):
 
 @pytest.fixture
 async def logo(alice):
-    """A PNG in the public tree, removed afterwards."""
+    """A PNG in the public tree, retired afterwards."""
     await alice.attach("root.public.logo", "image/png", PNG)
     yield "public/logo"
     await alice.detach("root.public.logo")
@@ -191,9 +205,12 @@ async def test_the_hex_round_trip_does_not_corrupt_anything(alice):
     every = bytes(range(256))
     await alice.attach("root.public.everybyte", "application/octet-stream", every)
     try:
-        found = await alice.attachment("root.public.everybyte")
-        assert found["bytes"] == every
-        assert found["byte_size"] == 256
+        row = await alice.document("root.public.everybyte")
+        assert row["content_bytes"] == every
+        assert row["size"] == 256
+        assert row["is_binary"] is True
+        assert row["content"] is None
+        assert await alice.content(row["id"]) == every
     finally:
         await alice.detach("root.public.everybyte")
 
@@ -305,7 +322,7 @@ async def test_a_file_over_the_limit_is_refused_by_the_database(alice, stack):
     try:
         with pytest.raises(PostgrestError):
             await alice.attach("root.public.toobig", "image/png", b"x" * 33)
-        assert await alice.attachment("root.public.toobig") is None
+        assert await alice.document("root.public.toobig") is None
     finally:
         stack.exec("update wiki.setting set value = '10485760' "
                    "where key = 'max_attachment_bytes'")
@@ -342,22 +359,56 @@ def test_the_server_only_writes_the_limit_when_it_is_told_one():
 
 # --- the mount does not see them -------------------------------------------
 
-async def test_an_attachment_is_not_in_the_tree_a_mirror_copies(stack, logo):
-    """It has no revision, so a mirror would write a zero-byte file where a
-    picture is. Until FUSE can carry bytes, leaving them out is the honest
-    answer."""
+async def test_a_file_is_in_the_tree_a_mirror_copies(stack, logo):
+    """It is a revision, so there is nothing to leave out. Under the old shape
+    it had none, and `syncable_document` had to exclude it or a mirror would
+    have written a zero-byte file where a picture was."""
     from fswiki_core.client import Client
     mirror = Client(stack.url, stack.token("alice"))  # the sync tree
     try:
-        paths = {row["path"] for row in await mirror.outline()}
-        assert "root.public.logo" not in paths
+        rows = {row["path"] for row in await mirror.outline()}
+        assert "root.public.logo" in rows
+        manifest = {row["path"]: row for row in await mirror.manifest()}
+        assert manifest["root.public.logo"]["size"] == len(PNG)
+        assert manifest["root.public.logo"]["content_type"] == "image/png"
     finally:
         await mirror.aclose()
 
 
-async def test_but_the_browser_does(alice, logo):
+async def test_and_in_the_one_the_browser_reads(alice, logo):
     paths = {row["path"] for row in await alice.outline()}
     assert "root.public.logo" in paths
+
+
+async def test_a_file_has_history_like_a_page(alice, stack):
+    """The reason it is a revision at all. A separate table could not have
+    joined the temporal model, so `document_as_of` would have shown a picture
+    that did not exist yet, or the current one at every instant."""
+    await alice.attach("root.public.chart", "image/png", PNG)
+    try:
+        second = await alice.attach("root.public.chart", "image/png", PNG + b"\x00")
+        assert second["version"] == 2
+        kept = stack.psql(
+            "select encode(v.content_bytes, 'hex') from wiki.document_version v "
+            "join wiki.document d on d.id = v.document_id "
+            "where d.path = 'root.public.chart' and v.version = 1")
+        assert bytes.fromhex(kept) == PNG
+    finally:
+        await alice.detach("root.public.chart")
+
+
+async def test_retiring_one_keeps_its_history(alice, stack):
+    """A tombstone, not a deletion. Attaching it again is another revision
+    rather than an apology."""
+    await alice.attach("root.public.temp", "image/png", PNG)
+    assert await alice.detach("root.public.temp")
+    assert await alice.document("root.public.temp") is None
+    assert stack.psql("select count(*) from wiki.document_version v "
+                      "join wiki.document d on d.id = v.document_id "
+                      "where d.path = 'root.public.temp'") == "2"
+    again = await alice.attach("root.public.temp", "image/png", PNG)
+    assert again["version"] == 3
+    await alice.detach("root.public.temp")
 
 
 # ---------------------------------------------------------------------------
@@ -376,9 +427,10 @@ def test_attach_puts_a_file_in_a_folder(cli, tmp_path, stack):
     try:
         assert r.code == 0, r.out
         assert "public/diagram" in r.out
-        assert stack.psql("select media_type from wiki.attachment a "
-                          "join wiki.document d on d.id = a.document_id "
-                          "where d.path = 'root.public.diagram'") == "image/png"
+        assert stack.psql("select v.content_type from wiki.document_version v "
+                          "join wiki.document d on d.id = v.document_id "
+                          "where d.path = 'root.public.diagram' "
+                          "and upper_inf(v.valid)") == "image/png"
     finally:
         cli("detach", "public/diagram.png", user="alice")
 
@@ -396,15 +448,18 @@ def test_attach_can_be_told_the_name(cli, tmp_path, stack):
 
 
 def test_a_second_attach_says_it_replaced(cli, tmp_path, stack):
-    source = tmp_path / "logo.png"
+    """A path of its own, because a revision number is a property of the path
+    and every other test in this file reaches for `public/logo`."""
+    source = tmp_path / "repeat.png"
     source.write_bytes(PNG)
     try:
-        assert "attached" in cli("attach", str(source), "public/", user="alice").out
+        first = cli("attach", str(source), "public/", user="alice")
+        assert "attached" in first.out and "revision 1" in first.out
         source.write_bytes(PNG + b"\x00")
-        r = cli("attach", str(source), "public/", user="alice")
-        assert "replaced" in r.out
+        second = cli("attach", str(source), "public/", user="alice")
+        assert "replaced" in second.out and "revision 2" in second.out
     finally:
-        cli("detach", "public/logo.png", user="alice")
+        cli("detach", "public/repeat.png", user="alice")
 
 
 def test_an_unguessable_type_asks_rather_than_guessing(cli, tmp_path):
@@ -438,15 +493,15 @@ def test_detaching_nothing_says_so_rather_than_succeeding(cli):
     assert "nothing to remove" in r.out
 
 
-def test_detach_says_it_is_permanent(cli, tmp_path):
-    """An attachment has no revisions, so there is no retire to offer instead.
-    A cheerful "removed" would be the wrong surprise."""
+def test_detach_says_the_history_is_kept(cli, tmp_path):
+    """A file is a revision, so removing one is a retirement. Saying
+    "permanently" would now be a lie, and it was the truth two commits ago."""
     source = tmp_path / "gone.png"
     source.write_bytes(PNG)
     cli("attach", str(source), "public/", user="alice")
     r = cli("detach", "public/gone.png", user="alice")
     assert r.code == 0, r.out
-    assert "permanently" in r.out
+    assert "retired" in r.out and "history is kept" in r.out
 
 
 def test_a_reader_may_not_attach(cli, tmp_path):

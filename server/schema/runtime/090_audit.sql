@@ -103,16 +103,20 @@ create or replace function wiki.read_document(
   p_document uuid,
   p_event    jsonb default null
 )
-returns table (content text)
+returns table (content text, content_bytes bytea)
 language plpgsql volatile
 set search_path = wiki, public, pg_temp as $$
 declare
   v_user    uuid := wiki.authenticated_user_id();
   v_acted   uuid := nullif(wiki.current_user_id(), wiki.authenticated_user_id());
   v_content text;
+  -- The other kind of body. Both columns travel and exactly one is ever set,
+  -- so a caller reading a page gets text and one reading a picture gets bytes,
+  -- with no second function and no flag deciding which.
+  v_bytes   bytea;
   v_found   boolean;
 begin
-  select d.content into v_content
+  select d.content, d.content_bytes into v_content, v_bytes
     from wiki.syncable_document d
    where d.id = p_document;
   v_found := found;
@@ -152,7 +156,7 @@ begin
   end if;
 
   if v_found then
-    return query select v_content;
+    return query select v_content, v_bytes;
   end if;
   return;
 end;
@@ -185,16 +189,17 @@ create or replace function wiki.view_document(
   p_document uuid,
   p_event    jsonb default null
 )
-returns table (content text)
+returns table (content text, content_bytes bytea)
 language plpgsql volatile
 set search_path = wiki, public, pg_temp as $$
 declare
   v_user    uuid;
   v_acted   uuid;
   v_content text;
+  v_bytes   bytea;
   v_found   boolean;
 begin
-  select d.content into v_content
+  select d.content, d.content_bytes into v_content, v_bytes
     from wiki.current_document d
    where d.id = p_document;
   v_found := found;
@@ -240,7 +245,7 @@ begin
   end if;
 
   if v_found then
-    return query select v_content;
+    return query select v_content, v_bytes;
   end if;
   return;
 end;

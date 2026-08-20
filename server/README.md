@@ -51,7 +51,7 @@ Three phases, in that order, and the order is the program:
 Phase 1 finishing before phase 2 begins protects **our** PostgREST and nothing
 else. Every other instance on the same database — the other half of a rolling
 deploy, a `fswiki-dev` someone left running, a person applying the schema from
-psql — still holds a cache built from 54 functions that have since been dropped
+psql — still holds a cache built from 79 functions that have since been dropped
 and recreated. It does not notice, and the symptom is the worst kind: `PGRST202
 Could not find the function … in the schema cache` for a function that plainly
 exists in psql, on the one server nobody thought to restart.

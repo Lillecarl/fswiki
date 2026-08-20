@@ -16,8 +16,8 @@ into published revisions.
     fswiki revert --apply a/b.md     # withdraw one
     fswiki render a/b.md             # HTML on stdout
     fswiki preview                   # read it in a browser while you write
-    fswiki attach logo.png pub/      # put a file in the wiki
-    fswiki detach pub/logo.png       # take it out again, permanently
+    fswiki attach logo.png pub/      # publish a file straight away
+    fswiki detach pub/logo.png       # retire one
 
 It depends on `fswiki-core`, not on the FUSE client, so publishing from a server
 or a CI job does not require the ability to mount anything.
@@ -245,7 +245,7 @@ An SSH tunnel does the same job without opening a port:
 worker thread and reaches the event loop through an anyio portal — one client,
 one connection pool, no second HTTP stack.
 
-## Attachments
+## Files
 
     fswiki attach diagram.png public/diagrams/
     fswiki attach diagram.png public/diagrams/plan.png
@@ -255,15 +255,23 @@ one connection pool, no second HTTP stack.
 A trailing `/` means "into this folder, under its own name", which is what `cp`
 does. The media type is guessed from the filename unless `--type` says so.
 
-Two things are worth knowing before you use it.
+Or through the mount, which is usually what you want:
 
-**It is not a draft.** An attachment goes straight to the wiki; there is no
-`push`, no diff and nothing for `status` to show. Bytes have no three-way
-merge, so the draft machinery has nothing to offer them.
+    cp diagram.png ~/wiki/public/diagrams/
+    fswiki status
+    fswiki push -m "the new architecture diagram"
 
-**`detach` is permanent.** An attachment has no revisions, so there is no
-retire to fall back on — which is why the wiki asks for `purge` rather than
-`delete`.
+A file is a *revision* of a document, so it behaves like a page everywhere:
+`status` shows it, `revert` undoes it, `push` publishes it, and it has history.
+`fswiki attach` is the shortcut that skips the draft; the mount does not.
+
+Three things bytes cannot do, each of which says so by name rather than
+producing nonsense. `merge` refuses — a three-way merge of two pictures is
+corruption, not a merge — though `push` still reports the conflict so you can
+decide which copy wins. `diff` reports sizes. `render` says "not a page".
+
+**`detach` retires rather than deletes.** Its history is kept, so attaching it
+again is another revision.
 
 The size limit belongs to the wiki, not to this program. The CLI asks for the
 number first so that a large file fails in a sentence instead of a round trip,
@@ -290,7 +298,7 @@ A page references one by path, the same way it references anything else:
   writing.
 - `attach` reads the whole file into memory and sends it hex-encoded, which
   doubles it in transit. Fine at the default 10 MiB cap; the fix, if it ever
-  matters, is in `Client.attachment`.
+  matters, is in `fswiki_core.client`.
 - No `acl` verbs. `wiki.explain_acl()` is the intended backend and returns the
   ACL in the order it is consulted, including the two rules that skip it — a
   superuser, and an owner's standing `grant`.

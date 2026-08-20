@@ -18,7 +18,7 @@ It is emphatically not re-run as desired state. `create table if not exists`
 silently ignores a definition that has changed since, which looks like it
 worked and leaves the column you added missing.
 
-**runtime/** is not state. 54 functions, 2 views, 24 policies, 18 triggers and
+**runtime/** is not state. 79 functions, 2 views, 24 policies, 25 triggers and
 every grant: objects with no contents of their own, whose definition is the
 file. Last-write-wins is not a compromise for these, it is correct. So they are
 dropped and replayed on every start, and the repository is the only place they

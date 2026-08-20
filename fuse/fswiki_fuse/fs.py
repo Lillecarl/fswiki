@@ -42,7 +42,7 @@ from fswiki_core.client import Client, PostgrestError, Unreachable
 from . import procinfo
 from .audit import AuditLog
 from .inodes import ROOT_INODE, InodeTable
-from .model import Node, Tree, build
+from .model import Node, Tree, build, draft_body
 
 log = logging.getLogger(__name__)
 
@@ -523,8 +523,14 @@ class FswikiFs(pyfuse3.Operations):
 
         # A draft is the author's own work and always wins over the published
         # tip: that is what makes the working copy a working copy.
-        if entry.draft is not None and entry.draft.get("content") is not None:
-            return entry.draft["content"].encode("utf-8")
+        #
+        # Two columns, because a revision has two kinds of body and a draft of
+        # one has to be able to hold either. Exactly one is ever set.
+        if entry.draft is not None:
+            if entry.draft.get("content_bytes") is not None:
+                return entry.draft["content_bytes"]
+            if entry.draft.get("content") is not None:
+                return entry.draft["content"].encode("utf-8")
         if entry.document_id is None or not entry.published:
             return b""
 
@@ -697,7 +703,13 @@ class FswikiFs(pyfuse3.Operations):
         if self._read_only or self._principal_id is None:
             raise pyfuse3.FUSEError(errno.EROFS)
 
-        text = data.decode("utf-8", errors="surrogateescape")
+        # Which column the body goes in follows from the content type, and it
+        # is the only place in this file that has to know. `surrogateescape`
+        # was never enough for a binary: it produces lone surrogates, which
+        # neither UTF-8 nor JSON can carry back out, so a picture written
+        # through the text column arrived corrupted or not at all.
+        binary = naming.is_binary_type(node.content_type)
+        text = None if binary else data.decode("utf-8", errors="surrogateescape")
 
         if node.document_id is None:
             operation, base_version = "create", None
@@ -730,6 +742,7 @@ class FswikiFs(pyfuse3.Operations):
                 path=node.path,
                 document_id=node.document_id,
                 content=text,
+                content_bytes=data if binary else None,
                 content_type=node.content_type,
                 base_version=base_version,
             )
@@ -795,11 +808,17 @@ class FswikiFs(pyfuse3.Operations):
         self._note(ctx, "create", path)
 
         try:
+            # An empty body, in whichever column this type belongs to. The
+            # draft shape check wants exactly one of them set, so a new
+            # picture starts as zero bytes rather than as an empty string
+            # that would later have to be told apart from one.
+            empty = naming.is_binary_type(content_type)
             await self._client.put_draft(
                 author_id=self._principal_id,
                 operation="create",
                 path=path,
-                content="",
+                content=None if empty else "",
+                content_bytes=b"" if empty else None,
                 content_type=content_type,
             )
         except (PostgrestError, Unreachable) as exc:
@@ -994,8 +1013,8 @@ class FswikiFs(pyfuse3.Operations):
 
         if source.document_id is None:
             # Renaming a draft that was never published: rewrite it in place.
-            data = (source.draft or {}).get("content") or ""
-            await self._create_draft(target_path, content_type, data.encode("utf-8"))
+            await self._create_draft(target_path, content_type,
+                                     draft_body(source.draft or {}))
             await self._drop_draft(source.path)
             # And the same rekey the scratch branch does above, for the same
             # reason: the kernel keeps the *source* inode and files it under the

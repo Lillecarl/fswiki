@@ -20,11 +20,6 @@ create view wiki.current_document
          d.path,
          d.slug,
          d.is_folder,
-         -- Which of the three kinds this row is. A column on the document
-         -- rather than a join to wiki.attachment, because that table's policy
-         -- is an ACL walk per row and this view is read by every request. See
-         -- tables/140_attachments.sql.
-         d.is_attachment,
          d.title,
          d.owner_id,
          d.inheritance_blocked,
@@ -36,10 +31,24 @@ create view wiki.current_document
          -- waiting, the second means its working copy is already current.
          v.author_id as version_author_id,
          v.content,
+         -- A binary body travels beside the text one rather than instead of
+         -- it, so a caller asking for `content` gets null for a picture rather
+         -- than something that decodes to nonsense. Exactly one is ever set;
+         -- see tables/150_binary_versions.sql.
+         v.content_bytes,
+         -- Which of the two kinds this revision is, without fetching either.
+         -- A folder and a tombstone are both false: neither has a body.
+         (v.content_bytes is not null or v.storage <> 'database') as is_binary,
+         -- Where the bytes are, for a client that can fetch them itself.
+         -- 'database' means the two columns above; anything else means the
+         -- locator, and wiki.storage_backend says what the name is.
+         v.storage,
+         v.locator,
          -- Byte length, so a client can stat a file without fetching it. FUSE
          -- needs st_size on every getattr and would otherwise pull the whole
-         -- body just to list a directory.
-         octet_length(v.content) as size,
+         -- body just to list a directory. Stored rather than measured now:
+         -- a body in a bucket has nothing here to measure.
+         v.byte_size as size,
          v.content_type,
          v.content_hash,
          v.created_at as version_created_at,
@@ -75,15 +84,14 @@ create view wiki.syncable_document
   with (security_invoker = true) as
   select d.*
     from wiki.current_document d
-   where not d.is_attachment
-     and (wiki.can_ctx(d.path, d.is_folder, d.owner_id, 'sync',
-                       (select wiki.acl_context('sync')))
-          or (d.is_folder and wiki.can_traverse(d.path, 'sync')));
+   where wiki.can_ctx(d.path, d.is_folder, d.owner_id, 'sync',
+                      (select wiki.acl_context('sync')))
+      or (d.is_folder and wiki.can_traverse(d.path, 'sync'));
 
 comment on view wiki.syncable_document is
   'The subtree a client may mirror locally. Always a subset of what RLS lets the '
-  'caller read, because `sync` requires `read`. Attachments are absent: they '
-  'have no revision, so a mirror would see a zero-byte file where a picture is.';
+  'caller read, because `sync` requires `read`. Binary revisions are in it: a '
+  'file is a revision, so a mirror gets one the way it gets a page.';
 
 -- The wiki as it stood at some instant. Same shape as current_document, so a
 -- history browser can render an old revision with the code that renders a live
@@ -92,12 +100,13 @@ comment on view wiki.syncable_document is
 create or replace function wiki.document_as_of(p_at timestamptz)
 returns table (
   id uuid, path ltree, slug text, is_folder boolean, title text,
-  version_id uuid, version integer, content text, content_type text,
-  content_hash bytea, version_created_at timestamptz
+  version_id uuid, version integer, content text, content_bytes bytea,
+  content_type text, content_hash bytea, version_created_at timestamptz
 )
 language sql stable parallel safe as $$
   select d.id, d.path, d.slug, d.is_folder, d.title,
-         v.id, v.version, v.content, v.content_type, v.content_hash, v.created_at
+         v.id, v.version, v.content, v.content_bytes, v.content_type,
+         v.content_hash, v.created_at
     from wiki.document d
     left join wiki.document_version v
       on v.document_id = d.id and v.valid @> p_at

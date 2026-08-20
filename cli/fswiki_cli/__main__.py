@@ -286,6 +286,13 @@ async def _merge(client: Client, principal: str, drafts: list[dict],
         if current is None or current == base_version:
             continue  # not conflicted; push will take it as it stands
 
+        if draft.get("content_bytes") is not None:
+            # A three-way merge of bytes is not a merge, it is corruption.
+            # Refused by name rather than attempted, and `push` will still
+            # report the conflict so the person can decide which copy wins.
+            skipped.append(display)
+            continue
+
         base = await client.revision(document_id, base_version)
         theirs = (await client.content(document_id)).decode("utf-8", errors="replace")
         if base is None:
@@ -366,6 +373,11 @@ async def _render(client: Client, drafts: list[dict],
     draft = next((d for d in drafts if d["path"] == path), None)
     content_type = "text/markdown"
 
+    if draft is not None and draft.get("content_bytes") is not None:
+        print(f"fswiki: {paths.to_display(path)} is a file, not a page",
+              file=sys.stderr)
+        return 1
+
     if args.draft or (draft is not None and draft.get("content") is not None):
         if draft is None or draft.get("content") is None:
             print(f"fswiki: no draft of yours at {paths.to_display(path)}",
@@ -377,6 +389,10 @@ async def _render(client: Client, drafts: list[dict],
         row = await client.document(path)
         if row is None:
             print(f"fswiki: no document at {paths.to_display(path)}",
+                  file=sys.stderr)
+            return 1
+        if row.get("is_binary"):
+            print(f"fswiki: {paths.to_display(path)} is a file, not a page",
                   file=sys.stderr)
             return 1
         text = row.get("content") or ""
@@ -473,9 +489,9 @@ async def _attach(client: Client, args: argparse.Namespace) -> int:
     # is what `cp` does and therefore what a person expects.
     wanted = args.path
     if wanted.endswith("/"):
-        wanted += naming.attachment_filename(source.stem, media_type)
+        wanted += naming.filename(source.stem, media_type, is_folder=False)
     try:
-        target = naming.from_route(wanted)
+        target = naming.from_display(wanted)
     except ValueError as exc:
         print(f"fswiki: {exc}", file=sys.stderr)
         return 1
@@ -492,23 +508,22 @@ async def _attach(client: Client, args: argparse.Namespace) -> int:
         print(f"fswiki: {exc}", file=sys.stderr)
         return 1
 
-    display = naming.attachment_filename(
-        naming.to_display(target).rsplit("/", 1)[-1], media_type)
-    verb = "attached" if result.get("created") else "replaced"
-    print(f"{verb} {naming.to_display(target)} ({display}, "
-          f"{result.get('byte_size', len(payload))} bytes)")
+    version = result.get("version")
+    verb = "attached" if version == 1 else "replaced"
+    print(f"{verb} {naming.to_display(target)} "
+          f"({result.get('byte_size', len(payload))} bytes, revision {version})")
     return 0
 
 
 async def _detach(client: Client, wanted: str) -> int:
-    """Remove one, permanently.
+    """Retire one.
 
-    Permanent because an attachment has no revisions -- there is no retire to
-    offer instead -- so the wiki asks for `purge` and this says so plainly
-    rather than reporting a cheerful "removed".
+    A tombstone revision rather than a deletion, because a file is a revision
+    and has history like a page. So it asks for `delete` rather than `purge`,
+    and the bytes stay where a page's text would.
     """
     try:
-        target = naming.from_route(wanted)
+        target = naming.from_display(wanted)
     except ValueError as exc:
         print(f"fswiki: {exc}", file=sys.stderr)
         return 1
@@ -521,8 +536,8 @@ async def _detach(client: Client, wanted: str) -> int:
         print(f"fswiki: nothing to remove at {naming.to_display(target)}",
               file=sys.stderr)
         return 1
-    print(f"removed {naming.to_display(target)} — permanently; "
-          f"an attachment has no history")
+    print(f"retired {naming.to_display(target)} — its history is kept, "
+          f"so attaching it again is another revision")
     return 0
 
 
@@ -536,9 +551,16 @@ async def _published_text(client: Client, draft: dict) -> str | None:
     if not document_id or draft["operation"] == "create":
         return None
     try:
-        return (await client.content(document_id)).decode("utf-8", errors="replace")
+        body = await client.content(document_id)
     except (LookupError, PostgrestError, Unreachable):
         return None
+    if draft.get("content_bytes") is not None:
+        # A binary draft never reaches a text diff -- report.render_diff and
+        # _lost both check first -- but they do use the length, so the bytes
+        # come back as latin-1 rather than as replacement characters that
+        # would make the "before" size a lie.
+        return body.decode("latin-1")
+    return body.decode("utf-8", errors="replace")
 
 
 def _select(drafts: list[dict], wanted: list[str]) -> list[dict] | None:

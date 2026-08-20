@@ -146,7 +146,7 @@ def _apply_drafts(nodes: dict[str, Node], drafts: list[dict]) -> None:
 
         if op == "create":
             slug = naming.ltree_labels(path)[-1]
-            content = draft.get("content") or ""
+            body = draft_body(draft)
             node = Node(
                 key=f"draft:{path}",
                 document_id=None,
@@ -155,7 +155,7 @@ def _apply_drafts(nodes: dict[str, Node], drafts: list[dict]) -> None:
                 is_folder=False,
                 content_type=draft.get("content_type") or naming.DEFAULT_CONTENT_TYPE,
                 version=None,
-                size=len(content.encode("utf-8")),
+                size=len(body),
                 mtime=_parse_time(draft.get("updated_at")),
                 # Nothing is published yet, so there is no ACL to consult; the
                 # author can obviously read and write their own draft, and push
@@ -176,9 +176,22 @@ def _apply_drafts(nodes: dict[str, Node], drafts: list[dict]) -> None:
         if op == "move" and path != target.path:
             target.path = path
             target.slug = naming.ltree_labels(path)[-1]
-        if draft.get("content") is not None:
-            target.size = len(draft["content"].encode("utf-8"))
+        if draft.get("content") is not None or draft.get("content_bytes") is not None:
+            target.size = len(draft_body(draft))
         target.mtime = _parse_time(draft.get("updated_at"))
+
+
+def draft_body(draft: dict) -> bytes:
+    """A draft's body as bytes, whichever column it is in.
+
+    Bytes because that is what `st_size` counts and what the kernel is handed.
+    A text draft is measured in UTF-8 rather than characters for the same
+    reason it always was: `st_size` is bytes, and a page of CJK is three times
+    what counting characters would claim.
+    """
+    if draft.get("content_bytes") is not None:
+        return draft["content_bytes"]
+    return (draft.get("content") or "").encode("utf-8")
 
 
 def _synthesise_ancestors(nodes: dict[str, Node]) -> str:

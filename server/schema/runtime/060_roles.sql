@@ -15,17 +15,13 @@ grant usage on schema wiki to fswiki_authenticator;
 -- Table privileges are the coarse gate; RLS is the fine one. A user role that
 -- can SELECT every table still only sees rows its policies admit.
 grant select on
-    wiki.document, wiki.document_version, wiki.attachment, wiki.ace, wiki.draft,
+    wiki.document, wiki.document_version, wiki.ace, wiki.draft,
     wiki.principal, wiki.user_account, wiki.group_member,
     wiki.role, wiki.role_capability, wiki.role_inherits
   to fswiki_user;
 
 grant insert, update, delete on wiki.draft            to fswiki_user;
 
--- Attachments are ordinary client writes gated by ordinary policies, the same
--- standing document_version has. wiki.attach() exists for the round trip and
--- the parent lookup, not because this needs hiding behind a definer function.
-grant insert, update, delete on wiki.attachment       to fswiki_user;
 
 grant insert, update, delete on wiki.ace              to fswiki_user;
 
@@ -110,13 +106,11 @@ revoke all on all tables in schema wiki from fswiki_anon;
 -- granted to public and no others. Notably absent: principal, user_account,
 -- group_member and the role tables. Those hold the user directory, and no page
 -- needs them to render.
--- Three tables now, all under RLS. `attachment` joins the other two because a
--- public page with a picture on it is a public page; the bytes are exactly as
--- readable as the document row they belong to, and no more. Still absent:
--- principal, user_account, group_member, the role tables -- and wiki.setting,
--- which no client role may touch at all.
-grant select on wiki.document, wiki.document_version, wiki.attachment
-  to fswiki_anon;
+-- Two tables, both under RLS. A picture is a revision of a document, so a
+-- public page with one on it needs no third grant. Still absent: principal,
+-- user_account, group_member, the role tables -- and wiki.setting, which no
+-- client role may touch at all.
+grant select on wiki.document, wiki.document_version to fswiki_anon;
 
 -- The self-only forms, and *only* the self-only forms. Each asks its question
 -- about wiki.current_user_id() and takes no principal argument, so there is no
