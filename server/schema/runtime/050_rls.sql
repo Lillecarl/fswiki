@@ -100,6 +100,49 @@ create policy draft_all on wiki.draft
       with check (author_id = wiki.current_user_id());
 
 ------------------------------------------------------------------------------
+-- Attachments: exactly as readable as the document they are
+------------------------------------------------------------------------------
+--
+-- Deliberately the same shape as document_version's four, and for the same
+-- reasons -- an attachment is a wiki.document row with bytes rather than
+-- revisions, so "who may fetch this file" is already answered by "who may read
+-- this document".
+--
+-- `read` and not the document policy, which also admits folders you may only
+-- traverse. Bytes must not follow a row in on those grounds any more than
+-- content may.
+create policy attachment_select on wiki.attachment
+  for select using (wiki.has_capability(document_id, 'read'));
+
+-- Putting the first one there is `create` on the folder, the same way a
+-- document's first revision is: whoever may add a file to a folder may fill it
+-- in, or bare `author` would let you make an attachment you cannot store.
+create policy attachment_insert on wiki.attachment
+  for insert with check (
+    wiki.has_capability(document_id, 'write')
+    or wiki.has_capability(
+         (select parent_id from wiki.document where id = document_id), 'create'));
+
+-- Replacing the bytes is an edit, because that is what it is. There is no
+-- history behind it to fall back on, which is why tables/140 says so out loud.
+create policy attachment_update on wiki.attachment
+  for update using (wiki.has_capability(document_id, 'write'))
+          with check (wiki.has_capability(document_id, 'write'));
+
+-- `purge`, not `delete`. Retiring a page keeps its revisions; there is nothing
+-- to keep here, so the only removal on offer is the permanent one and it asks
+-- for the capability that means permanent.
+create policy attachment_delete on wiki.attachment
+  for delete using (wiki.has_capability(document_id, 'purge'));
+
+-- wiki.setting has RLS enabled in tables/140 and no policy at all, which is
+-- not an omission. RLS with no policy denies every row to every role that is
+-- not the owner, so the limit is readable only through
+-- wiki.max_attachment_bytes(), which is SECURITY DEFINER. A caller who could
+-- read the row could not change it; a caller who could change it could accept
+-- their own uploads.
+
+------------------------------------------------------------------------------
 -- ACEs: you may read the ACL of anything you can read, and edit the ACL of
 -- anything you hold 'grant' on.
 ------------------------------------------------------------------------------

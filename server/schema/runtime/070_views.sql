@@ -20,6 +20,11 @@ create view wiki.current_document
          d.path,
          d.slug,
          d.is_folder,
+         -- Which of the three kinds this row is. A column on the document
+         -- rather than a join to wiki.attachment, because that table's policy
+         -- is an ACL walk per row and this view is read by every request. See
+         -- tables/140_attachments.sql.
+         d.is_attachment,
          d.title,
          d.owner_id,
          d.inheritance_blocked,
@@ -70,13 +75,15 @@ create view wiki.syncable_document
   with (security_invoker = true) as
   select d.*
     from wiki.current_document d
-   where wiki.can_ctx(d.path, d.is_folder, d.owner_id, 'sync',
-                      (select wiki.acl_context('sync')))
-      or (d.is_folder and wiki.can_traverse(d.path, 'sync'));
+   where not d.is_attachment
+     and (wiki.can_ctx(d.path, d.is_folder, d.owner_id, 'sync',
+                       (select wiki.acl_context('sync')))
+          or (d.is_folder and wiki.can_traverse(d.path, 'sync')));
 
 comment on view wiki.syncable_document is
   'The subtree a client may mirror locally. Always a subset of what RLS lets the '
-  'caller read, because `sync` requires `read`.';
+  'caller read, because `sync` requires `read`. Attachments are absent: they '
+  'have no revision, so a mirror would see a zero-byte file where a picture is.';
 
 -- The wiki as it stood at some instant. Same shape as current_document, so a
 -- history browser can render an old revision with the code that renders a live
