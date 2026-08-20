@@ -10,13 +10,19 @@ editor and point tools at it.
 Runs in the foreground on **trio**, which is pyfuse3's native backend — no
 asyncio shim. httpx composes with it because httpcore is built on anyio.
 
-### macOS 26+
+### macOS
 
-The Darwin package uses FUSE-T's FSKit backend: no kernel extension, Xcode, or
-locally signed filesystem extension is involved. Install the pre-signed app
-from the `fuse-t` output in `/Applications`, then enable **fuse-t** once under
-System Settings > General > Login Items & Extensions > File System Extensions.
-`pluginkit` can register the extension but cannot grant this FSKit approval.
+The Darwin package uses FUSE-T and defaults to its NFS transport. It needs no
+kernel extension, Xcode, signing, or filesystem-extension approval:
+
+    nix run --file .. fuse -- --backend nfs \
+      --token "$(fswiki-dev token bob)" ~/wiki
+
+Set `--backend fskit` (or `FSWIKI_FUSE_BACKEND=fskit`) to use the optional
+FSKit transport on macOS 26+. Install the pre-signed app from the `fuse-t`
+output in `/Applications`, then enable **fuse-t** once under System Settings >
+General > Login Items & Extensions > File System Extensions. `pluginkit` can
+register the extension but cannot grant this FSKit approval.
 
 FSKit officially supports mount points below `/Volumes`; use a path there for
 predictable behaviour. FUSE-T currently accepts some paths elsewhere, but that
@@ -25,7 +31,8 @@ is outside FSKit's documented mount-point contract.
     nix-build .. -A fuse-t
     cp -R result/Applications/fuse-t.app /Applications/
     mkdir /Volumes/fswiki
-    nix run --file .. fuse -- --token "$(fswiki-dev token bob)" /Volumes/fswiki
+    nix run --file .. fuse -- --backend fskit \
+      --token "$(fswiki-dev token bob)" /Volumes/fswiki
 
 | module | |
 | --- | --- |

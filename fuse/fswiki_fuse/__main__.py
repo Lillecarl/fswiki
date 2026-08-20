@@ -53,6 +53,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="seconds between change_token() checks; the manifest is re-fetched "
              "only when the token moves (default: %(default)s)",
     )
+    ap.add_argument(
+        "--backend",
+        choices=("nfs", "fskit"),
+        default=os.environ.get("FSWIKI_FUSE_BACKEND", "nfs"),
+        help="FUSE-T transport on macOS (default: %(default)s; may also be "
+             "set with $FSWIKI_FUSE_BACKEND)",
+    )
     ap.add_argument("--read-only", action="store_true", help="refuse all writes")
     ap.add_argument(
         "--as", dest="act_as", metavar="USER",
@@ -99,6 +106,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 async def run(args: argparse.Namespace) -> int:
+    if sys.platform != "darwin" and args.backend != "nfs":
+        log.error("--backend is a macOS FUSE-T option")
+        return 1
     if args.act_as and args.act_as_groups:
         log.error("--as and --as-group are different questions; pick one")
         return 1
@@ -198,10 +208,7 @@ async def run(args: argparse.Namespace) -> int:
         options = set(pyfuse3.default_options)
         options.add("fsname=fswiki")
         if sys.platform == "darwin":
-            # FUSE-T also has an NFS backend. Select its FSKit transport
-            # explicitly so the mount stays entirely within Apple's supported
-            # userspace filesystem path.
-            options.add("backend=fskit")
+            options.add(f"backend={args.backend}")
         options.discard("default_permissions")
         if fs.read_only:
             # The kernel then refuses writes before they ever reach us, which
