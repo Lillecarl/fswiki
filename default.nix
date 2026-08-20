@@ -7,6 +7,9 @@
   core = pkgs.callPackage ./core { };
   cli = pkgs.callPackage ./cli { };
   fuse = pkgs.callPackage ./fuse { };
+  # Python bindings for Apple's macOS 15+ FSKit framework. Kept separate from
+  # the Linux FUSE client so both filesystem frontends can evolve independently.
+  pyobjc-framework-FSKit = pkgs.callPackage ./nix/pyobjc-framework-FSKit.nix { };
   # The browser-facing reader, and the schema it loads on startup. Not a
   # client: it holds no identity, passes a visitor's token through, and lets
   # Postgres decide what comes back.
