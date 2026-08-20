@@ -8,7 +8,6 @@
 }:
 
 let
-  fuse-t = callPackage ../nix/fuse-t/fuse-t.nix { };
   pyfuse3 =
     if stdenv.hostPlatform.isDarwin then
       callPackage ../nix/fuse-t/pyfuse3-t.nix { }
@@ -47,7 +46,7 @@ python3Packages.buildPythonApplication {
     if stdenv.hostPlatform.isDarwin then
       ''
         wrapProgram $out/bin/fswiki-mount \
-          --set FUSE_NFSSRV_PATH ${fuse-t}/bin/go-nfsv4
+          --set FUSE_NFSSRV_PATH "/Library/Application Support/fuse-t/bin/go-nfsv4"
       ''
     else
       ''

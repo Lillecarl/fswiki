@@ -12,7 +12,9 @@ asyncio shim. httpx composes with it because httpcore is built on anyio.
 
 ### macOS
 
-The Darwin package uses FUSE-T and defaults to its NFS transport. It needs no
+The Darwin package uses the system-installed FUSE-T runtime and defaults to its
+NFS transport. Install FUSE-T's official package first; fswiki expects its
+helper at `/Library/Application Support/fuse-t/bin/go-nfsv4`. NFS needs no
 kernel extension, Xcode, signing, or filesystem-extension approval:
 
     nix run --file .. fuse -- --backend nfs \

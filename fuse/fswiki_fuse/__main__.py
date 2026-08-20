@@ -263,6 +263,14 @@ def main(argv: list[str] | None = None) -> int:
     if not os.path.isdir(args.mountpoint):
         log.error("%s is not a directory", args.mountpoint)
         return 1
+    if sys.platform == "darwin":
+        helper = os.environ.get("FUSE_NFSSRV_PATH")
+        if not helper or not os.access(helper, os.X_OK):
+            log.error(
+                "FUSE-T is not installed: expected an executable helper at %s",
+                helper or "/Library/Application Support/fuse-t/bin/go-nfsv4",
+            )
+            return 1
 
     try:
         return trio.run(run, args)
