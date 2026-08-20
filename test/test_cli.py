@@ -6,11 +6,17 @@ argument parsing, exit codes and what lands on stderr are part of what a CLI is.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from conftest import wait_for
 
 pytestmark = pytest.mark.mount
+no_macos_xattrs = pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="the FUSE-T NFS and FSKit transports do not expose xattrs",
+)
 
 
 @pytest.fixture
@@ -86,6 +92,7 @@ def test_diff_shows_the_added_line(cli, edit):
     assert "+edited via the mount" in cli("diff")
 
 
+@no_macos_xattrs
 def test_a_path_inside_the_mount_resolves_through_the_xattr(cli, edit, mount):
     """The CLI does not reimplement the naming rules; it asks the mount."""
     edit("engineering/runbook.md", "# Runbook\n")
@@ -102,6 +109,7 @@ def test_a_dry_run_changes_nothing(cli, edit, clean):
     assert clean.count("select count(*) from wiki.draft") == 1
 
 
+@no_macos_xattrs
 def test_push_can_take_a_subset(cli, edit, clean, mount):
     edit("engineering/onboarding.md", "# Onboarding\n\nedited\n")
     edit("engineering/runbook.md", "# Runbook\n\nfresh\n")

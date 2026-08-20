@@ -15,12 +15,17 @@ from __future__ import annotations
 import os
 import stat
 import subprocess
+import sys
 
 import pytest
 
 from conftest import wait_for
 
 pytestmark = pytest.mark.mount
+no_macos_xattrs = pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="the FUSE-T NFS and FSKit transports do not expose xattrs",
+)
 
 
 def mode(path) -> int:
@@ -132,6 +137,7 @@ def xattr(path, name: str) -> str:
     return out.stdout.strip()
 
 
+@no_macos_xattrs
 def test_state_is_exposed_as_an_xattr(mount, clean):
     """So a shell prompt or a status line can see it without asking the server."""
     page = mount / "engineering/onboarding.md"
@@ -141,12 +147,14 @@ def test_state_is_exposed_as_an_xattr(mount, clean):
     assert xattr(page, "state") == "draft"
 
 
+@no_macos_xattrs
 def test_the_ltree_path_is_exposed_as_an_xattr(mount, clean):
     """Which is how the CLI resolves a mount path without reimplementing the
     naming rules — see the `fswiki diff <path-in-the-mount>` test."""
     assert xattr(mount / "engineering/onboarding.md", "path") == "root.engineering.onboarding"
 
 
+@no_macos_xattrs
 def test_capabilities_are_exposed_as_an_xattr(mount, clean):
     caps = xattr(mount / "engineering/onboarding.md", "capabilities").split(",")
     assert "read" in caps and "write" in caps
@@ -154,6 +162,7 @@ def test_capabilities_are_exposed_as_an_xattr(mount, clean):
     assert "write" not in xattr(mount / "public/welcome.md", "capabilities")
 
 
+@no_macos_xattrs
 def test_a_local_only_file_says_so(mount, clean):
     """A scratch name cannot be a slug, so it never reaches the server. Saying
     that in the xattr is the only way the mount can tell anyone."""
@@ -366,6 +375,7 @@ def test_dot_dot_walks_back_up(mount, clean):
     assert (mount / "engineering/private/../onboarding.md").is_file()
 
 
+@no_macos_xattrs
 def test_getfattr_dumps_every_attribute(mount, clean):
     """`getfattr -d`, which is what someone types before they know the names.
     Every other test here asks for one attribute by name and so never
@@ -377,6 +387,7 @@ def test_getfattr_dumps_every_attribute(mount, clean):
         assert f"user.fswiki.{name}=" in out.stdout, out.stdout
 
 
+@no_macos_xattrs
 def test_a_scratch_file_advertises_only_that_it_is_scratch(mount, clean):
     """It has no server-side existence, so there is no path, no capability set
     and no revision to report — and inventing any of them would be a lie a
@@ -394,6 +405,7 @@ def test_a_scratch_file_advertises_only_that_it_is_scratch(mount, clean):
         scratch.unlink()
 
 
+@no_macos_xattrs
 def test_an_attribute_that_is_not_ours_is_simply_absent(mount, clean):
     """Not an error the caller has to special-case: ENOATTR is what every
     filesystem says, and tools like `cp -a` ask for attributes nobody has."""
@@ -403,6 +415,7 @@ def test_an_attribute_that_is_not_ours_is_simply_absent(mount, clean):
         assert out.returncode != 0, f"{name} should not exist"
 
 
+@no_macos_xattrs
 def test_the_acl_is_not_administered_through_xattrs(mount, clean):
     """Refusing plainly beats accepting and discarding. Granting somebody
     `write` needs a grammar and an audit trail, and `setfattr` has neither —

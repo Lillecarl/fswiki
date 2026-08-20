@@ -12,10 +12,16 @@ Pure functions and one temporary file: no stack, no network.
 from __future__ import annotations
 
 import os
+import sys
 
 import pytest
 
 from fswiki_cli import paths
+
+no_macos_xattrs = pytest.mark.skipif(
+    sys.platform == "darwin",
+    reason="the FUSE-T NFS and FSKit transports do not expose xattrs",
+)
 
 
 @pytest.mark.parametrize("typed", [
@@ -78,6 +84,7 @@ def test_a_path_that_is_not_a_file_is_not_consulted_for_xattrs():
     assert paths.from_xattr("root.public.welcome") is None
 
 
+@no_macos_xattrs
 def test_a_real_file_beats_every_guess(tmp_path):
     """The mount records the exact path on the file, and a recorded answer is
     the only one that is certainly right — it survives the mount being
@@ -93,6 +100,7 @@ def test_a_real_file_beats_every_guess(tmp_path):
     assert paths.resolve(str(f)) == "root.somewhere.else"
 
 
+@no_macos_xattrs
 def test_an_empty_xattr_is_treated_as_absent(tmp_path):
     f = tmp_path / "guide.md"
     f.write_text("x")

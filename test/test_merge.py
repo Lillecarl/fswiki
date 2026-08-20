@@ -8,12 +8,19 @@ all. These tests set up the race deliberately rather than hoping for it.
 from __future__ import annotations
 
 import subprocess
+import sys
 
 import pytest
 
 from conftest import wait_for
 
-pytestmark = pytest.mark.mount
+pytestmark = [
+    pytest.mark.mount,
+    pytest.mark.skipif(
+        sys.platform == "darwin",
+        reason="merge synchronization currently observes mount state through xattrs",
+    ),
+]
 
 TARGET = "root.engineering.onboarding"
 FILE = "engineering/onboarding.md"
