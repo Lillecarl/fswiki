@@ -10,6 +10,22 @@ create table if not exists wiki_test.result (
   detail text
 );
 
+-- How many assertions were *attempted*, as against how many were recorded.
+--
+-- A sequence because a sequence is the one thing in PostgreSQL a ROLLBACK does
+-- not undo. `result` is an ordinary table, so an assertion made inside a
+-- `begin; ... rollback;` block runs, decides, and then has its verdict thrown
+-- away with everything else -- the suite reports a smaller total and says
+-- nothing about the difference.
+--
+-- That is not hypothetical. Five assertions in 080_closure_test.sql spent
+-- their whole life inside such a block: they ran on every single run and no
+-- run ever reported them. A failing one would have been silent.
+--
+-- 999_harness_test.sql compares the two numbers, so losing a verdict is now
+-- itself a failing assertion rather than a smaller total nobody was counting.
+create sequence if not exists wiki_test.attempted;
+
 -- SECURITY DEFINER so assertions still record while the session has SET ROLE to
 -- an unprivileged wiki role.
 create or replace function wiki_test.expect(p_label text, p_ok boolean, p_detail text default null)
@@ -17,6 +33,8 @@ returns void
 language plpgsql security definer
 set search_path = wiki_test, pg_temp as $$
 begin
+  -- Before the insert, and outside any transaction the caller may roll back.
+  perform nextval('wiki_test.attempted');
   insert into wiki_test.result (label, ok, detail)
   values (p_label, coalesce(p_ok, false), p_detail);
 end;

@@ -41,7 +41,7 @@ def sql_results(stack):
 
     for path in schema_files():
         _load(stack.pg_port, path, db=SQL_DB)
-    for path in sorted((ROOT / "server" / "test").glob("0*.sql")):
+    for path in sorted((ROOT / "server" / "test").glob("[0-9]*.sql")):
         _load(stack.pg_port, path, db=SQL_DB)
 
     raw = stack.psql(

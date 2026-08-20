@@ -89,33 +89,37 @@ select wiki_test.expect('a role created after the seed is in the closure',
 select wiki_test.expect('and does not cover what it was not given',
   not wiki.ace_covers(wiki.role_id('retirer'), 'write', 'allow'));
 
--- Each of the four inputs, moved, and the closure following. Rolled back, so
--- the assertions below still see the schema the rest of the suite does.
-begin;
-  insert into wiki.role (name, description) values ('closure_probe', 'temporary');
-  select wiki_test.expect('a brand new role covers nothing yet',
-    not wiki.ace_covers(wiki.role_id('closure_probe'), 'read', 'allow'));
+-- Each of the four inputs, moved, and the closure following.
+--
+-- It cleans up after itself statement by statement rather than wrapping the
+-- block in a transaction, and that is not a style choice: `wiki_test.result`
+-- is an ordinary table, so a ROLLBACK takes the verdicts with it. These five
+-- assertions used to run on every pass and be reported on none of them. See
+-- the sequence in 000_harness.sql, and the check in 999_harness_test.sql that
+-- makes the mistake loud.
+insert into wiki.role (name, description) values ('closure_probe', 'temporary');
+select wiki_test.expect('a brand new role covers nothing yet',
+  not wiki.ace_covers(wiki.role_id('closure_probe'), 'read', 'allow'));
 
-  insert into wiki.role_capability (role_id, capability)
-  values (wiki.role_id('closure_probe'), 'read');
-  select wiki_test.expect('granting it a capability reaches the closure',
-    wiki.ace_covers(wiki.role_id('closure_probe'), 'read', 'allow'));
+insert into wiki.role_capability (role_id, capability)
+values (wiki.role_id('closure_probe'), 'read');
+select wiki_test.expect('granting it a capability reaches the closure',
+  wiki.ace_covers(wiki.role_id('closure_probe'), 'read', 'allow'));
 
-  insert into wiki.role_inherits (role_id, inherits_role_id)
-  values (wiki.role_id('closure_probe'), wiki.role_id('editor'));
-  select wiki_test.expect('and so does inheriting one',
-    wiki.ace_covers(wiki.role_id('closure_probe'), 'write', 'allow'));
+insert into wiki.role_inherits (role_id, inherits_role_id)
+values (wiki.role_id('closure_probe'), wiki.role_id('editor'));
+select wiki_test.expect('and so does inheriting one',
+  wiki.ace_covers(wiki.role_id('closure_probe'), 'write', 'allow'));
 
-  delete from wiki.role_capability where role_id = wiki.role_id('closure_probe');
-  delete from wiki.role_inherits where role_id = wiki.role_id('closure_probe');
-  select wiki_test.expect('taking them away reaches it too',
-    not wiki.ace_covers(wiki.role_id('closure_probe'), 'read', 'allow'));
+delete from wiki.role_capability where role_id = wiki.role_id('closure_probe');
+delete from wiki.role_inherits where role_id = wiki.role_id('closure_probe');
+select wiki_test.expect('taking them away reaches it too',
+  not wiki.ace_covers(wiki.role_id('closure_probe'), 'read', 'allow'));
 
-  delete from wiki.role where name = 'closure_probe';
-  select wiki_test.expect_eq('and dropping the role leaves nothing behind',
-    (select count(*)::int from wiki.ace_closure x
-      join wiki.role r on r.id = x.role_id where r.name = 'closure_probe'), 0);
-rollback;
+delete from wiki.role where name = 'closure_probe';
+select wiki_test.expect_eq('and dropping the role leaves nothing behind',
+  (select count(*)::int from wiki.ace_closure x
+    join wiki.role r on r.id = x.role_id where r.name = 'closure_probe'), 0);
 
 -- The closure is still what it was, after all that.
 select wiki_test.expect_eq('the closure survives the probe unchanged',

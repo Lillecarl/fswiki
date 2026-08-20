@@ -40,7 +40,7 @@ for track in tables runtime seed; do
 done
 
 echo "==> loading fixtures and tests"
-for f in "$here"/0*.sql; do
+for f in "$here"/[0-9]*.sql; do
   echo "    $(basename "$f")"
   # Assertions report through wiki_test.result; the per-statement output is noise.
   psql -q -d fswiki -f "$f" >/dev/null
