@@ -2,11 +2,9 @@
 
 Three forms are accepted, in this order of preference:
 
-1. **A file inside a mount.** The FUSE client publishes `user.fswiki.path` as an
-   extended attribute, so the exact path can be read off the file rather than
-   reconstructed. This is the only form that is certainly right — it survives
-   the mount being somewhere unexpected and needs no guess about where the wiki
-   root is.
+1. **A file inside a mount.** The root's `.fswiki` metadata identifies the mount
+   and its server; the document path is relative to that root. Linux xattrs are
+   retained as a compatibility shortcut.
 2. **An ltree path**, `root.public.welcome`, passed straight through.
 3. **A filesystem-looking path**, `public/welcome.md`, converted by stripping the
    extension and joining the parts with dots.
@@ -15,11 +13,21 @@ Three forms are accepted, in this order of preference:
 from __future__ import annotations
 
 import os
+import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from fswiki_core import naming
 
 XATTR_PATH = "user.fswiki.path"
+MOUNT_FILE = ".fswiki"
+
+
+@dataclass(frozen=True)
+class MountPath:
+    path: str
+    url: str
+    root: Path
 
 
 class PathError(ValueError):
@@ -33,6 +41,32 @@ def from_xattr(value: str) -> str | None:
     except (OSError, AttributeError):
         return None
     return raw.decode("utf-8", errors="replace") or None
+
+
+def from_mount(value: str) -> MountPath | None:
+    """Resolve an existing path through the nearest fswiki mount marker."""
+    target = Path(value).expanduser()
+    if not target.exists():
+        return None
+    target = target.resolve()
+    start = target if target.is_dir() else target.parent
+    for directory in (start, *start.parents):
+        marker = directory / MOUNT_FILE
+        try:
+            metadata = json.loads(marker.read_text())
+        except (OSError, ValueError, TypeError):
+            continue
+        if (metadata.get("format") != "fswiki-mount"
+                or metadata.get("version") != 1
+                or not isinstance(metadata.get("url"), str)):
+            continue
+        relative = target.relative_to(directory)
+        if not relative.parts:
+            path = "root"
+        else:
+            path = from_filesystem(str(relative))
+        return MountPath(path=path, url=metadata["url"], root=directory)
+    return None
 
 
 def from_filesystem(value: str) -> str:
@@ -67,6 +101,9 @@ def from_filesystem(value: str) -> str:
 
 def resolve(value: str) -> str:
     """Best available interpretation of one user-supplied path."""
+    mounted = from_mount(value)
+    if mounted:
+        return mounted.path
     recorded = from_xattr(value)
     if recorded:
         return recorded

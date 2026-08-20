@@ -55,6 +55,13 @@ def test_whoami(cli, clean):
     assert r.code == 0 and clean.who("bob") in r
 
 
+def test_show_prints_source_from_a_path_inside_the_mount(cli, mount, clean):
+    expected = clean.content("root.public.welcome")
+    r = cli("show", str(mount / "public/welcome.md"), FSWIKI_URL="http://127.0.0.1:1")
+    assert r.code == 0
+    assert r.out == expected
+
+
 def test_status_with_nothing_pending(cli, clean):
     assert "Nothing pending" in cli("status")
 

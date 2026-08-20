@@ -23,6 +23,7 @@ import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -536,7 +537,10 @@ class Mount:
         Idempotent, so the factory's own teardown can run over a mount a test
         has already stopped.
         """
-        subprocess.run(["fusermount3", "-u", str(self.path)], capture_output=True)
+        command = (["diskutil", "unmount", "force", str(self.path)]
+                   if sys.platform == "darwin"
+                   else ["fusermount3", "-u", str(self.path)])
+        subprocess.run(command, capture_output=True)
         try:
             self.proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
@@ -552,8 +556,9 @@ def mount_factory(stack, tmp_path_factory):
     directory that hangs every `ls` — so the unmount runs even if the process
     is already dead.
     """
-    _require("fswiki-mount", "fusermount3")
-    if not os.path.exists("/dev/fuse"):
+    _require("fswiki-mount", *(("diskutil",) if sys.platform == "darwin"
+                               else ("fusermount3",)))
+    if sys.platform != "darwin" and not os.path.exists("/dev/fuse"):
         # A build sandbox has null, zero, random, tty and little else in /dev,
         # and no amount of unsharing conjures a device node that is not there.
         # Skipping says that; the alternative is every mount test failing with

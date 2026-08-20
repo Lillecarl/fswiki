@@ -51,6 +51,15 @@ FSKit transport does not expose them. Ordinary file operations are unaffected.
 
 ## What you see
 
+The mount root contains a virtual, read-only `.fswiki` JSON file. It is a
+versioned marker for tools, not a wiki document, and records the server URL but
+never the authentication token:
+
+    {"format": "fswiki-mount", "url": "https://wiki.example", "version": 1}
+
+This lets the CLI recognize paths inside a mount on every backend, including
+macOS where filesystem xattrs are unavailable.
+
 `wiki.syncable_document`, which is *not* the same as what you can read. `sync`
 is a separate capability, so a document can be perfectly readable in the browser
 and absent from the mount — that is the audit lever working, not a bug. Reads go

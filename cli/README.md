@@ -14,6 +14,7 @@ into published revisions.
     fswiki push -n -m "..."          # dry run
     fswiki revert                    # what withdrawing your drafts would cost
     fswiki revert --apply a/b.md     # withdraw one
+    fswiki show ~/wiki/a/b.md        # print source from a mounted path
     fswiki render a/b.md             # HTML on stdout
     fswiki preview                   # read it in a browser while you write
     fswiki attach logo.png pub/      # publish a file straight away
@@ -26,9 +27,10 @@ or a CI job does not require the ability to mount anything.
 
 Three forms are accepted, tried in this order:
 
-1. **A file inside a mount.** The FUSE client exposes `user.fswiki.path` as an
-   extended attribute, so the exact document path is read off the file rather
-   than reconstructed. This is the only form that is certainly right.
+1. **A file inside a mount.** The CLI finds the root's versioned `.fswiki`
+   marker, derives the document path relative to it, and discovers the server
+   URL. The marker contains no authentication token. Linux xattrs remain a
+   compatibility fallback.
 2. **An ltree path** — `root.public.welcome` — used as given.
 3. **A filesystem path** — `public/welcome.md` — converted by stripping the
    extension and joining with dots.

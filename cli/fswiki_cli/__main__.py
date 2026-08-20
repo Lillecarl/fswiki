@@ -33,8 +33,9 @@ from . import paths, preview, report
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(prog="fswiki", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--url", default=os.environ.get("FSWIKI_URL", "http://127.0.0.1:3000"),
-                    help="PostgREST base URL (default: %(default)s)")
+    ap.add_argument("--url", default=None,
+                    help="PostgREST base URL (default: mount metadata, "
+                         "$FSWIKI_URL, or http://127.0.0.1:3000)")
     ap.add_argument("--token", default=os.environ.get("FSWIKI_TOKEN"),
                     help="JWT; defaults to $FSWIKI_TOKEN")
     ap.add_argument("--no-colour", action="store_true", help="plain output")
@@ -53,6 +54,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     sub.add_parser("whoami", help="check the token resolves to a principal")
     sub.add_parser("status", help="list your pending drafts")
+
+    p_show = sub.add_parser("show", help="print a document's source")
+    p_show.add_argument("path", help="ltree path, wiki path, or path inside a mount")
 
     p_diff = sub.add_parser("diff", help="show what push would change")
     p_diff.add_argument("paths", nargs="*", help="limit to these paths")
@@ -146,6 +150,9 @@ async def run(args: argparse.Namespace) -> int:
         print("fswiki: --as and --as-group are different questions; pick one",
               file=sys.stderr)
         return 1
+    mounted = paths.from_mount(args.path) if args.command == "show" else None
+    args.url = (args.url or (mounted.url if mounted else None)
+                or os.environ.get("FSWIKI_URL") or "http://127.0.0.1:3000")
     client = Client(args.url, args.token,
                     act_as=args.act_as, act_as_groups=args.act_as_groups)
     try:
@@ -163,6 +170,9 @@ async def run(args: argparse.Namespace) -> int:
         if args.command == "whoami":
             print(principal)
             return 0
+
+        if args.command == "show":
+            return await _show(client, mounted.path if mounted else args.path)
 
         # Before the draft list, which neither of these needs: an attachment
         # is not a draft and never becomes one.
@@ -250,6 +260,37 @@ async def run(args: argparse.Namespace) -> int:
         return 0 if ok else 1
     finally:
         await client.aclose()
+
+
+async def _show(client: Client, raw_path: str) -> int:
+    """Print the source represented by a wiki path, without rendering it."""
+    try:
+        path = paths.resolve(raw_path)
+    except paths.PathError as exc:
+        print(f"fswiki: {exc}", file=sys.stderr)
+        return 1
+
+    draft = next((row for row in await client.drafts() if row["path"] == path), None)
+    if draft is not None:
+        if draft.get("operation") == "delete":
+            print(f"fswiki: {paths.to_display(path)} is pending retirement",
+                  file=sys.stderr)
+            return 1
+        if draft.get("content_bytes") is not None:
+            sys.stdout.buffer.write(draft["content_bytes"])
+        else:
+            print(draft.get("content") or "", end="")
+        return 0
+
+    row = await client.document(path)
+    if row is None:
+        print(f"fswiki: no document at {paths.to_display(path)}", file=sys.stderr)
+        return 1
+    if row.get("is_binary"):
+        sys.stdout.buffer.write(row.get("content_bytes") or b"")
+    else:
+        print(row.get("content") or "", end="")
+    return 0
 
 
 async def _merge(client: Client, principal: str, drafts: list[dict],

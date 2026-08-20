@@ -12,6 +12,7 @@ Isolation comes from the `clean` fixture, not from remounting.
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -53,6 +54,27 @@ def test_a_document_that_may_not_be_mirrored_is_absent(mount, clean):
 
 def test_a_document_with_no_published_revision_stats_as_empty(mount, clean):
     assert (mount / "public/unpublished.md").stat().st_size == 0
+
+
+def test_the_root_identifies_the_mount_without_exposing_credentials(mount, clean):
+    marker = mount / ".fswiki"
+    metadata = json.loads(marker.read_text())
+    assert metadata == {
+        "format": "fswiki-mount",
+        "version": 1,
+        "url": clean.url,
+    }
+    assert stat.S_IMODE(marker.stat().st_mode) == 0o444
+    assert "token" not in marker.read_text().lower()
+
+
+def test_the_mount_marker_cannot_be_rewritten_or_removed(mount, clean):
+    marker = mount / ".fswiki"
+    with pytest.raises(OSError):
+        marker.write_text("not metadata")
+    with pytest.raises(OSError):
+        marker.unlink()
+    assert json.loads(marker.read_text())["format"] == "fswiki-mount"
 
 
 def test_size_matches_the_bytes_that_come_out(mount, clean):

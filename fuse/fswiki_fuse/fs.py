@@ -22,10 +22,12 @@ the draft is posted, not because this file guessed.
 from __future__ import annotations
 
 import errno
+import json
 import logging
 import os
 import stat
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit, urlunsplit
 
 import anyio
 import pyfuse3
@@ -49,6 +51,13 @@ log = logging.getLogger(__name__)
 XATTR_PREFIX = "user.fswiki."
 
 
+def _public_url(value: str) -> str:
+    """A connection address suitable for a world-readable marker."""
+    parsed = urlsplit(value)
+    return urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1],
+                       parsed.path, parsed.query, parsed.fragment))
+
+
 @dataclass
 class Scratch:
     """A local-only file or directory. Never leaves this process."""
@@ -59,6 +68,7 @@ class Scratch:
     is_dir: bool = False
     data: bytearray = field(default_factory=bytearray)
     mtime: float = 0.0
+    read_only: bool = False
 
     @property
     def size(self) -> int:
@@ -167,6 +177,18 @@ class FswikiFs(pyfuse3.Operations):
 
         self._uid = os.getuid()
         self._gid = os.getgid()
+        metadata = {
+            "format": "fswiki-mount",
+            "version": 1,
+            "url": _public_url(client.base_url),
+        }
+        self._metadata = Scratch(
+            key="virtual:.fswiki",
+            parent_key="",
+            name=".fswiki",
+            data=bytearray((json.dumps(metadata, sort_keys=True) + "\n").encode()),
+            read_only=True,
+        )
 
     @property
     def read_only(self) -> bool:
@@ -259,6 +281,8 @@ class FswikiFs(pyfuse3.Operations):
         key = self._inodes.key_for(inode)
         if key is None:
             return None
+        if key == self._metadata.key:
+            return self._metadata
         if key in self._scratch:
             return self._scratch[key]
         return self._tree.get(key) if self._tree else None
@@ -282,6 +306,9 @@ class FswikiFs(pyfuse3.Operations):
         for scratch in self._scratch.values():
             if scratch.parent_key == key:
                 entries[scratch.name] = scratch
+        if self._tree is not None and key == self._tree.root_key:
+            self._metadata.parent_key = key
+            entries[self._metadata.name] = self._metadata
         return entries
 
     # ------------------------------------------------------------------
@@ -302,7 +329,7 @@ class FswikiFs(pyfuse3.Operations):
                 attrs.st_nlink = 2
                 attrs.st_size = 0
             else:
-                attrs.st_mode = stat.S_IFREG | 0o644
+                attrs.st_mode = stat.S_IFREG | (0o444 if entry.read_only else 0o644)
                 attrs.st_nlink = 1
                 attrs.st_size = entry.size
             mtime_ns = int(entry.mtime * 1e9)
@@ -452,6 +479,8 @@ class FswikiFs(pyfuse3.Operations):
             raise pyfuse3.FUSEError(errno.EISDIR)
 
         writing = bool(flags & (os.O_WRONLY | os.O_RDWR))
+        if writing and isinstance(entry, Scratch) and entry.read_only:
+            raise pyfuse3.FUSEError(errno.EROFS)
         if writing and self._read_only:
             raise pyfuse3.FUSEError(errno.EROFS)
         if writing and isinstance(entry, Node) and not entry.writable:
@@ -590,6 +619,8 @@ class FswikiFs(pyfuse3.Operations):
             raise pyfuse3.FUSEError(errno.ENOENT)
 
         if fields.update_size:
+            if isinstance(entry, Scratch) and entry.read_only:
+                raise pyfuse3.FUSEError(errno.EROFS)
             size = attr.st_size
             if fh is not None and isinstance(self._handles.get(fh), Handle):
                 handle = self._handles[fh]
@@ -872,6 +903,8 @@ class FswikiFs(pyfuse3.Operations):
             raise pyfuse3.FUSEError(errno.ENOENT)
 
         if isinstance(entry, Scratch):
+            if entry.read_only:
+                raise pyfuse3.FUSEError(errno.EROFS)
             if entry.is_dir:
                 raise pyfuse3.FUSEError(errno.EISDIR)
             del self._scratch[entry.key]
@@ -957,8 +990,12 @@ class FswikiFs(pyfuse3.Operations):
         source = self._dir_entries(old_parent_key).get(name_old)
         if source is None:
             raise pyfuse3.FUSEError(errno.ENOENT)
+        if isinstance(source, Scratch) and source.read_only:
+            raise pyfuse3.FUSEError(errno.EROFS)
 
         destination = self._dir_entries(new_parent_key).get(name_new)
+        if isinstance(destination, Scratch) and destination.read_only:
+            raise pyfuse3.FUSEError(errno.EROFS)
         new_parent = self._resolve(parent_new)
         parsed = naming.parse_filename(name_new)
         parent_path = new_parent.path if isinstance(new_parent, Node) else None

@@ -11,6 +11,7 @@ Pure functions and one temporary file: no stack, no network.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 
@@ -75,6 +76,30 @@ def test_things_that_only_look_like_ltree(value):
 
 def test_resolve_falls_through_to_the_filesystem_reading():
     assert paths.resolve("public/welcome.md") == "root.public.welcome"
+
+
+def test_a_path_inside_a_marked_mount_finds_its_path_and_server(tmp_path):
+    mount = tmp_path / "mount with spaces"
+    page = mount / "public" / "welcome.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("hello")
+    (mount / ".fswiki").write_text(json.dumps({
+        "format": "fswiki-mount", "version": 1, "url": "https://wiki.example",
+    }))
+
+    found = paths.from_mount(str(page))
+    assert found is not None
+    assert found.path == "root.public.welcome"
+    assert found.url == "https://wiki.example"
+    assert found.root == mount
+    assert paths.resolve(str(page)) == "root.public.welcome"
+
+
+def test_an_unrelated_dot_fswiki_file_is_not_a_mount_marker(tmp_path):
+    page = tmp_path / "welcome.md"
+    page.write_text("hello")
+    (tmp_path / ".fswiki").write_text("not fswiki metadata")
+    assert paths.from_mount(str(page)) is None
 
 
 def test_a_path_that_is_not_a_file_is_not_consulted_for_xattrs():
