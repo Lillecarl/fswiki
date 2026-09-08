@@ -134,5 +134,38 @@ what the module decides and no in-process test can reach: which user each
 connection arrives as, who owns the tables, the fetched key set, and the
 ordering, which nothing but systemd arranges.
 
-Neither covers a browser, because there is nothing for a browser to do: see the
-first section.
+`tests.browser` drives the half a password grant skips. A real Firefox opens
+dex's authorization endpoint, fills in its login form, grants consent, and
+follows the redirect; the code becomes a token, the token goes in an
+`fswiki_session` cookie, and the wiki serves bob a page it does not serve a
+visitor. Both halves are asserted in the same browser, one navigation apart, so
+the difference cannot be anything but the cookie.
+
+What that does **not** cover is fswiki starting the flow or handling the
+callback, because it does neither — see the first section. The test is the
+relying party: it exchanges the code itself. When there is a login, the exchange
+moves into the server and the browser half stays as it is.
+
+Two things about that test are worth knowing before you change it.
+
+**The browser runs on the host, not in the guest.** io_uring does not work under
+User-Mode Linux — the guest prints `BUG: Bad page map … file:[io_uring]` once
+per ring page and then stops answering at all, so the failure arrives as a
+timeout naming nothing. Every browser reaches for it, Firefox and Chromium
+alike. Running the browser outside is also where a person's browser is anyway.
+
+**The guest's address is fixed rather than handed out.** dex compares a
+`redirect_uri` exactly, so the address the browser will use has to be known when
+dex is configured, which is before anything boots. Hence `127.0.0.2` in
+`test/default.nix` and in dex's `issuer`: dex builds its own absolute URLs from
+the issuer, so one naming `127.0.0.1` would send a host browser to its own
+loopback.
+
+## Still to come
+
+TLS, and with it a CA the browser trusts. Everything above is `http` on
+loopback, which is honest for a test on one machine and is not a deployment. The
+part that needs care is that `security.pki.certificateFiles` reaches curl and
+anything using OpenSSL but **not** a browser: Chromium reads NSS at
+`sql:$HOME/.pki/nssdb` and Firefox keeps its own store, so a browser trusts a
+private CA only once `certutil -A` has put it there.
