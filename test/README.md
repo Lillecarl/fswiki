@@ -131,6 +131,7 @@ Then against a live stack:
 | `test_audit.py` | the access trail over HTTP |
 | `test_impersonation.py` | `--as` / `--as-group` over HTTP |
 | `test_public.py` | what a request with no token at all can reach |
+| `test_oidc.py` | a token this wiki did not sign, verified against a JWK Set |
 | `test_server_migrate.py` | the schema load, the lock that makes it repeatable, and the notification that reaches a PostgREST we did not start |
 | `test_server_postgrest.py` | PostgREST as a child process, and its reload signal |
 | `test_server_app.py` | the browser-facing server, driven over ASGI |

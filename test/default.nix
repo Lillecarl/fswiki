@@ -48,6 +48,12 @@ let
     ps.trio
     ps.pytest-xdist
     ps.pytest-cov
+    # RSA, for test_oidc.py. The suite signs its own HS256 tokens in twelve
+    # lines of hmac and needs nothing for that; an RS256 signature and a JWK's
+    # modulus are not something to hand-roll. Not pyjwt: the tokens are still
+    # assembled claim by claim where a test can read them, and this only does
+    # the arithmetic.
+    ps.cryptography
     # For fswiki_fuse.inodes, which is a dict, a Counter and the kernel's
     # lookup-count protocol -- and imports pyfuse3 for one constant. Importing
     # it does not open /dev/fuse, so it works in the sandbox; only mounting

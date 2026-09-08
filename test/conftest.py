@@ -297,19 +297,27 @@ def stack():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def _start_postgrest(stack: Stack, port: int, log_path: Path) -> subprocess.Popen:
+def _start_postgrest(stack: Stack, port: int, log_path: Path, *,
+                     secret: str | None = None,
+                     probe_token: str | None = None) -> subprocess.Popen:
     """One PostgREST against `stack`'s cluster, ready to serve queries.
 
     Factored out because a test that wants to know what a client does when the
     server goes away needs a PostgREST it is allowed to kill, and killing the
     session's own would take every later test with it.
+
+    `secret` and `probe_token` are for a server that verifies something other
+    than this stack's HS256 tokens — a JWK Set, in `test_oidc.py`. They go
+    together on purpose: a server holding somebody else's public key cannot be
+    asked whether it is up with a token this stack signed, and the readiness
+    check has to be a request that would succeed.
     """
     env = dict(os.environ)
     env.update(
         PGRST_DB_URI=f"postgres://fswiki_authenticator@127.0.0.1:{stack.pg_port}/fswiki",
         PGRST_DB_SCHEMAS="wiki",
         PGRST_DB_ANON_ROLE="fswiki_anon",
-        PGRST_JWT_SECRET=stack.secret,
+        PGRST_JWT_SECRET=stack.secret if secret is None else secret,
         PGRST_SERVER_HOST="127.0.0.1",
         PGRST_SERVER_PORT=str(port),
         PGRST_DB_POOL="4",
@@ -319,6 +327,7 @@ def _start_postgrest(stack: Stack, port: int, log_path: Path) -> subprocess.Pope
     )
     log = open(log_path, "a")
     proc = subprocess.Popen(["postgrest"], env=env, stdout=log, stderr=log)
+    token = stack.token("bob") if probe_token is None else probe_token
 
     def up():
         if proc.poll() is not None:
@@ -329,7 +338,7 @@ def _start_postgrest(stack: Stack, port: int, log_path: Path) -> subprocess.Pope
         # failed request several tests later.
         try:
             return http(f"http://127.0.0.1:{port}/syncable_document?select=id&limit=1",
-                        token=stack.token("bob"), timeout=2).code == 200
+                        token=token, timeout=2).code == 200
         except urllib.error.URLError:
             # Not listening yet. Only a refused connection is "not yet"; a
             # server that answers badly is a failure and must not be waited out.
