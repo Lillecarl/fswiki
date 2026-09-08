@@ -281,6 +281,24 @@ let
     seed = "${src}/dev/seed.sql";
   };
 
+  # Who the browser logs in as, in the order the screenshots read best.
+  #
+  # Chosen for what the fixtures do to them, which is documented at the top of
+  # server/test/010_fixtures.sql:
+  #
+  #   alice  a superuser, so the tree with nothing removed from it
+  #   bob    engineering editor, but `private` blocks inheritance and stops him
+  #   carol  denied read across engineering by an inherited contractors ACE,
+  #          and explicitly allowed on `onboarding` anyway -- the thing a
+  #          per-object ACL does that a scoped grant cannot
+  #   erin   in no groups at all, and so sees nothing whatsoever
+  identities = [
+    "alice"
+    "bob"
+    "carol"
+    "erin"
+  ];
+
   # One machine, two tests. `integration` asks whether the units come up and
   # agree; `browser` asks the same machine to be logged into. Sharing the
   # definition is what keeps the second from quietly drifting into testing a
@@ -376,30 +394,27 @@ let
             redirectURIs = [ "http://127.0.0.2:8080/callback" ];
           }
         ];
-        staticPasswords = [
-          {
-            email = "bob@test.invalid";
-            # bcrypt of "hunter2". dex takes a hash and never a password, and
-            # rejects a cost below 10, so this is what a static user looks
-            # like even in a test.
-            hash = "$2b$10$LeqL5/urOiX.HE7ftw1xCukjWNePRR/78px/6qWP4xLekq8XxqHHe";
-            username = "bob";
-            userID = "bob-at-dex";
-            # What becomes the `groups` claim, and so -- through
-            # roleClaimKey above -- the database role. The second group is
-            # here to keep the first from being the only one: `.groups[0]`
-            # has to pick, and a list of one would not show that it does.
-            #
-            # storage.Password carries these and connectors/password.go
-            # hands them to the identity verbatim, so a password grant gets
-            # them like any other flow. dex's own
-            # server_grant_password_test.go asserts exactly that.
-            groups = [
-              "fswiki_user"
-              "engineering"
-            ];
-          }
-        ];
+        # Four of the fixture users, so a browser can be each of them in turn
+        # and the difference can be looked at rather than asserted about.
+        #
+        # One password for all four. They are a test's users and the thing
+        # being shown is what an ACL does, not what a password does.
+        #
+        # `groups` here is not the wiki's idea of a group. It carries one
+        # thing: the database role, through roleClaimKey. Whether alice is a
+        # superuser and erin is in nothing at all is the fixtures' business,
+        # and dex has no idea about any of it -- which is the point, because
+        # that is how a real deployment is arranged too.
+        staticPasswords = map (user: {
+          email = "${user}@test.invalid";
+          username = user;
+          userID = "${user}-at-dex";
+          # bcrypt of "hunter2". dex takes a hash and never a password, and
+          # rejects a cost below 10, so this is what a static user looks like
+          # even in a test.
+          hash = "$2b$10$LeqL5/urOiX.HE7ftw1xCukjWNePRR/78px/6qWP4xLekq8XxqHHe";
+          groups = [ "fswiki_user" ];
+        }) identities;
       };
     };
   };
@@ -438,9 +453,14 @@ let
     name = "fswiki-browser";
     script = ./browser.py;
     settings = fixtures // {
+      inherit identities;
       script = "${./browser_login.py}";
       python = pkgs.python3.withPackages (ps: [ ps.playwright ]);
       browsers = "${pkgs.playwright-driver.browsers}";
+      # The screenshots are what this test is for, and a screenshot of a wiki
+      # page is flat colour and two typefaces -- the case a palette does well.
+      # About a fifth of the size, and nothing a reader would notice.
+      pngquant = lib.getExe pkgs.pngquant;
     };
     nodes.node = {
       imports = [ deployed ];

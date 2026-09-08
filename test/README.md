@@ -99,6 +99,33 @@ repository root. **It is not registered yet**, so for now say where it is:
 changing both projects at once: an edit there is visible here without a commit,
 a push and a bumped pointer in between.
 
+## Looking at it
+
+    nix build --file . tests.browser -L
+    xdg-open result/screens/carol/01-root.png
+
+The browser test is the one whose output you read rather than whose exit code
+you trust. A real Firefox logs in through dex — its authorization endpoint, its
+login form, consent, the redirect carrying a code — four times, as four of the
+fixture users, and photographs the same six pages as each of them. They land
+under `$out/screens/<who>/`, about 200 KiB for the lot.
+
+The pictures are the point. An ACL is a prediction about what somebody will be
+able to see, and `ls` is the experiment; a screenshot is the only artefact that
+answers *does it look right* — a child missing from a tree, a wikilink gone to
+plain text because its target is forbidden. Compare `alice/01-root.png` with
+`carol/01-root.png`: carol has `engineering/onboarding`, from an explicit allow,
+and no `engineering/secret-plans`, from the contractors deny inherited above it.
+`erin/01-root.png` is empty, which is what being in no groups looks like.
+
+One assertion survives in code — that bob is served something a visitor is not —
+because "the cookie did nothing" is a failure a machine should catch. The rest
+is for a person.
+
+The browser runs on the **host**, against ports passt forwards out of the guest.
+It has to: io_uring does not work under User-Mode Linux, and every browser
+reaches for it. See `docs/oidc.md`.
+
 ## What is where
 
 Pure units first — no stack, no network, no mount, milliseconds each:

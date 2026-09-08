@@ -7,6 +7,7 @@ which runs on the host against ports passt forwards out of the guest.
 """
 
 import asyncio
+import json
 import os
 
 from uml_runner import run_test
@@ -17,6 +18,9 @@ READY = 120
 BROWSE = 600
 
 WIKI = "http://127.0.0.1:8080"
+# The address dex calls itself, reachable from inside the guest and from the
+# host alike. See the forward in test/default.nix.
+DEX = "http://127.0.0.2:5556/dex"
 
 
 async def test(vms):
@@ -44,37 +48,38 @@ async def test(vms):
             timeout=120,
         )
 
-    # dex's subject is opaque and not a username, so bob's account has to be
-    # pointed at it before a token of dex's can resolve to him -- and that has
-    # to happen before the browser reads a page, which is the last thing the
-    # browser does.
+    # dex's subject is opaque and is not a username, so each account has to be
+    # pointed at it before a token of dex's can resolve to anybody -- and that
+    # has to happen before the browser reads a page, which is the last thing
+    # the browser does.
     #
-    # So the subject is fetched here with a password grant, which is cheap and
-    # already proven in integration.py. Deriving it instead would mean writing
-    # dex's encoding of (userID, connector) into this file as a base64 constant,
+    # The subjects come from password grants, which are cheap and already
+    # proven in integration.py. Deriving them instead would mean writing dex's
+    # encoding of (userID, connector) into this file as four base64 constants,
     # and a constant nobody can read is a constant nobody will fix.
     issuer = (await vm.succeed(
-        "curl -sS http://127.0.0.1:5556/dex/.well-known/openid-configuration"
-        " | jq -r .issuer")).strip()
-    access = (await vm.succeed(
-        "curl -sS -X POST http://127.0.0.1:5556/dex/token"
-        " -d grant_type=password -d client_id=fswiki"
-        " -d client_secret=fswiki-test-secret"
-        " -d username=bob@test.invalid -d password=hunter2"
-        " -d scope='openid groups' | jq -r .access_token")).strip()
-    subject = (await vm.succeed(
-        f"curl -sS -H 'Authorization: Bearer {access}'"
-        " http://127.0.0.1:5556/dex/userinfo | jq -r .sub")).strip()
-    assert subject and subject != "null", "dex named no subject"
+        f"curl -sS {DEX}/.well-known/openid-configuration | jq -r .issuer")).strip()
 
-    await vm.succeed(
-        "psql -U postgres -qAt -d fswiki -v ON_ERROR_STOP=1 -c "
-        f"\"update wiki.user_account set oidc_issuer = '{issuer}', "
-        f"oidc_subject = '{subject}' "
-        "where principal_id = (select id from wiki.principal "
-        "where kind = 'user' and name = 'bob')\""
-    )
-    print("[test] bob's account names dex")
+    for user in settings["identities"]:
+        access = (await vm.succeed(
+            f"curl -sS -X POST {DEX}/token"
+            " -d grant_type=password -d client_id=fswiki"
+            " -d client_secret=fswiki-test-secret"
+            f" -d username={user}@test.invalid -d password=hunter2"
+            " -d scope='openid groups' | jq -r .access_token")).strip()
+        assert access and access != "null", f"dex would not issue for {user}"
+        subject = (await vm.succeed(
+            f"curl -sS -H 'Authorization: Bearer {access}'"
+            f" {DEX}/userinfo | jq -r .sub")).strip()
+        assert subject and subject != "null", f"dex named no subject for {user}"
+        await vm.succeed(
+            "psql -U postgres -qAt -d fswiki -v ON_ERROR_STOP=1 -c "
+            f"\"update wiki.user_account set oidc_issuer = '{issuer}', "
+            f"oidc_subject = '{subject}' "
+            "where principal_id = (select id from wiki.principal "
+            f"where kind = 'user' and name = '{user}')\""
+        )
+    print(f"[test] {len(settings['identities'])} accounts now name dex")
 
     # --- and now the browser, on this side ---------------------------------
     #
@@ -91,9 +96,17 @@ async def test(vms):
     assert wiki and dex, f"not forwarded: wiki={wiki} dex={dex}"
     print(f"[test] the host reaches the wiki on {wiki[0]} and dex on {dex[0]}")
 
+    # $out is a directory here rather than the empty file mkTest would leave.
+    # The screenshots are the deliverable: `nix build --file . tests.browser`
+    # and the pictures are under ./result/screens.
+    destination = os.environ["out"]
+    os.makedirs(destination, exist_ok=True)
+
     proc = await asyncio.create_subprocess_exec(
         f"{settings['python']}/bin/python3", settings["script"],
         f"http://{wiki[0]}", f"http://{dex[0]}/dex",
+        destination, settings["pngquant"],
+        json.dumps(settings["identities"]),
         env={**os.environ,
              "HOME": os.environ.get("TMPDIR", "/tmp"),
              "PLAYWRIGHT_BROWSERS_PATH": settings["browsers"]},
@@ -103,7 +116,9 @@ async def test(vms):
     out, _ = await asyncio.wait_for(proc.communicate(), timeout=BROWSE)
     print(out.decode())
     assert proc.returncode == 0, f"the browser script exited {proc.returncode}"
-    print("[test] logged in through a browser")
+
+    shots = sum(len(files) for _, _, files in os.walk(destination))
+    print(f"[test] {shots} files under $out; the screenshots are the point")
 
 
 run_test(test)
