@@ -80,6 +80,10 @@ class Config:
     postgrest_host: str = "127.0.0.1"
     postgrest_port: int = 3000
     postgrest_jwt_secret: str | None = None
+    # A JSPath naming the claim PostgREST reads the database role from. None
+    # leaves PostgREST's default, `.role`. See environment() in postgrest.py for
+    # why a deployment with a real identity provider has to set it.
+    postgrest_jwt_role_claim_key: str | None = None
     # PostgREST connects as fswiki_authenticator, which can do nothing itself
     # and holds the two nologin roles it switches between. The migration URL
     # above needs DDL rights and this one must not have them, so they are two
@@ -131,6 +135,7 @@ class Config:
             postgrest_host=e.get("FSWIKI_POSTGREST_HOST", cls.postgrest_host),
             postgrest_port=int(e.get("FSWIKI_POSTGREST_PORT", cls.postgrest_port)),
             postgrest_jwt_secret=e.get("FSWIKI_JWT_SECRET"),
+            postgrest_jwt_role_claim_key=e.get("FSWIKI_JWT_ROLE_CLAIM_KEY"),
             postgrest_database_url=e.get("FSWIKI_POSTGREST_DATABASE_URL"),
             render_cache_bytes=int(
                 e.get("FSWIKI_RENDER_CACHE_BYTES", cls.render_cache_bytes)),

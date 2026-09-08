@@ -299,7 +299,8 @@ def stack():
 
 def _start_postgrest(stack: Stack, port: int, log_path: Path, *,
                      secret: str | None = None,
-                     probe_token: str | None = None) -> subprocess.Popen:
+                     probe_token: str | None = None,
+                     extra_env: dict[str, str] | None = None) -> subprocess.Popen:
     """One PostgREST against `stack`'s cluster, ready to serve queries.
 
     Factored out because a test that wants to know what a client does when the
@@ -325,6 +326,7 @@ def _start_postgrest(stack: Stack, port: int, log_path: Path, *,
         # testing a feature that is not switched on.
         PGRST_DB_PRE_REQUEST="wiki.pre_request",
     )
+    env.update(extra_env or {})
     log = open(log_path, "a")
     proc = subprocess.Popen(["postgrest"], env=env, stdout=log, stderr=log)
     token = stack.token("bob") if probe_token is None else probe_token

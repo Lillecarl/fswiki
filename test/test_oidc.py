@@ -19,8 +19,8 @@ than a secret it shares. Postgres resolves `(iss, sub)` to a principal in
 `wiki.authenticated_user_id()`, and neither of the other two knows that
 function exists.
 
-This is also the piece a Keycloak test would sit on. Booting a real provider
-answers "does Keycloak issue what we expect"; it cannot tell you whether an
+This is also the piece the guest integration test sits on. Booting a real
+provider answers "does dex issue what we expect"; it cannot tell you whether an
 RSA-signed token reaches the right row, because a failure there looks the same
 either way. That question is answerable in a second, in a build sandbox, and it
 is answered here.
@@ -80,7 +80,8 @@ class Issuer:
         }]}
 
     def token(self, subject: str, *, issuer: str = ISSUER,
-              role: str | None = "fswiki_user", ttl: int = 3600) -> str:
+              role: str | None = "fswiki_user", groups: list[str] | None = None,
+              ttl: int = 3600) -> str:
         """An RS256 token, assembled in the open.
 
         Written out rather than handed to pyjwt for the same reason
@@ -92,6 +93,8 @@ class Issuer:
         payload = {"iss": issuer, "sub": subject, "iat": now, "exp": now + ttl}
         if role is not None:
             payload["role"] = role
+        if groups is not None:
+            payload["groups"] = groups
         signing = (_b64u(json.dumps(header).encode()) + "."
                    + _b64u(json.dumps(payload).encode())).encode()
         sig = self._key.sign(signing, padding.PKCS1v15(), hashes.SHA256())
@@ -124,6 +127,35 @@ def oidc(stack, idp, tmp_path_factory):
         stack, port, log,
         secret=json.dumps(idp.jwks),
         probe_token=idp.token("bob"),
+    )
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            proc.kill()
+
+
+@pytest.fixture(scope="module")
+def oidc_groups(stack, idp, tmp_path_factory):
+    """The same, for a provider that names groups rather than database roles.
+
+    Which is every provider. An OIDC token says who the holder is and what
+    groups they are in; "the Postgres role to SET ROLE to" is not a thing an
+    identity provider knows. So the deployment points PostgREST at the claim its
+    provider does emit, and that one setting is the whole of the integration.
+
+    `.groups[0]` is dex's shape, and it is the one used by the guest test.
+    """
+    port = free_port()
+    log = tmp_path_factory.mktemp("oidc-groups") / "postgrest.log"
+    proc = _start_postgrest(
+        stack, port, log,
+        secret=json.dumps(idp.jwks),
+        probe_token=idp.token("bob", role=None, groups=["fswiki_user"]),
+        extra_env={"PGRST_JWT_ROLE_CLAIM_KEY": ".groups[0]"},
     )
     try:
         yield f"http://127.0.0.1:{port}"
@@ -254,3 +286,41 @@ def test_the_role_claim_does_not_narrow_what_a_token_holder_reads(oidc, idp, rol
     assert any(p.startswith("root.engineering") for p in served), served
     assert served > anonymous
 
+
+
+def test_the_role_can_come_from_a_group_claim(stack, oidc_groups, idp):
+    """What a deployment with a real provider actually configures.
+
+    The token carries no `role` at all -- it carries `groups`, the way an OIDC
+    token does -- and PostgREST is pointed at `.groups[0]` instead. Everything
+    downstream is unchanged: the same signature, the same (iss, sub), the same
+    principal, the same rows.
+
+    This is the seam `FSWIKI_JWT_ROLE_CLAIM_KEY` exists for. It is asserted here
+    rather than only in the guest test because a provider that has booted proves
+    the mapping works for that provider; this proves it works at all, in a
+    second, without one.
+    """
+    token = idp.token("bob", role=None, groups=["fswiki_user"])
+
+    got = _whoami(oidc_groups, token)
+    assert got.code == 200, got.body
+    assert got.json == stack.who("bob")
+
+    rows = http(f"{oidc_groups}/current_document?select=path&limit=1", token=token)
+    assert rows.code == 200, rows.body
+    assert rows.json
+
+
+def test_a_group_that_is_not_a_role_is_refused(oidc_groups, idp):
+    """And the mapping is not a wish.
+
+    A token whose first group names something that is not a database role --
+    which is what most of a user's groups are -- cannot be served. PostgREST
+    fails the SET ROLE rather than falling back to the anonymous role, so a
+    misconfigured claim key is loud at the first request instead of quietly
+    downgrading everyone.
+    """
+    refused = _whoami(oidc_groups, idp.token("bob", role=None,
+                                             groups=["engineering"]))
+    assert refused.code >= 400, refused.body

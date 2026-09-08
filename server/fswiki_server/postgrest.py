@@ -70,6 +70,17 @@ def environment(config: Config) -> dict[str, str]:
     })
     if config.postgrest_jwt_secret:
         env["PGRST_JWT_SECRET"] = config.postgrest_jwt_secret
+    # Which claim names the database role. Unset means PostgREST's own default,
+    # `.role`, which is what a token minted for this wiki carries.
+    #
+    # A real provider does not carry it. An OIDC token says who the holder is,
+    # in `iss` and `sub`, and what groups they are in; naming a Postgres role is
+    # not a thing an identity provider knows how to do. So a deployment points
+    # this at whatever its provider does emit -- `.groups[0]` for dex, a
+    # namespaced claim elsewhere -- and that mapping is the whole of the
+    # integration. See docs/oidc.md.
+    if config.postgrest_jwt_role_claim_key:
+        env["PGRST_JWT_ROLE_CLAIM_KEY"] = config.postgrest_jwt_role_claim_key
     return env
 
 
