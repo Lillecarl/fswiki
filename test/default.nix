@@ -14,6 +14,20 @@
 let
   inherit (pkgs) lib;
 
+  # The checkout, as a build input.
+  #
+  # `user-mode-nixos` is dropped rather than swept in. It is a checkout of
+  # another project that happens to sit here, it is megabytes, and including it
+  # would rebuild every suite below whenever a commit landed in it -- for a
+  # directory none of them reads. The guest test names what it needs out of it
+  # by path, which is a dependency Nix can see.
+  src = lib.cleanSourceWith {
+    src = ../.;
+    filter =
+      path: type:
+      baseNameOf (toString path) != "user-mode-nixos" && lib.cleanSourceFilter path type;
+  };
+
   fswiki-core = pkgs.callPackage ../core { };
   fswiki-cli = pkgs.callPackage ../cli { };
   fswiki-fuse = pkgs.callPackage ../fuse { };
@@ -161,7 +175,7 @@ let
     pkgs.runCommand "fswiki-check"
       {
         nativeBuildInputs = [ runner ];
-        src = lib.cleanSource ../.;
+        inherit src;
         # httpx builds a default SSL context even for an http:// URL, and looking
         # for a CA bundle that is not there fails with a bare FileNotFoundError
         # from ssl.py -- nothing to do with this suite, but it takes out every test
@@ -174,7 +188,68 @@ let
         fswiki-test -m 'not mount' -p no:cacheprovider
         touch $out
       '';
+
+  # The other half, in a User-Mode Linux guest.
+  #
+  #   nix build --file . tests.guest -L
+  #
+  # `check` above stops at /dev/fuse, which a build sandbox does not have and
+  # cannot be given. A UML guest is a Linux kernel compiled as an ordinary
+  # program, so it brings its own -- and with it the mount tests, inside a pure
+  # build, with no KVM, no root and no `unshare` invocation to remember.
+  #
+  # The guest is root, which is what the mount wants, and Postgres refuses to
+  # be. conftest already handles that -- as uid 0 it drops initdb and pg_ctl to
+  # uid 1000 -- so the node only has to make uid 1000 a real user, because
+  # initdb looks itself up with getpwuid before it does anything else.
+  #
+  # Nothing is copied into the guest. The store arrives over hostfs, so the
+  # runner and the checkout are named in `settings` as store paths and read
+  # from where they already are.
+  #
+  # user-mode-nixos is a submodule at the repository root. FSWIKI_UML points at
+  # a checkout somewhere else, which is what you want while changing both at
+  # once: an edit there is visible here without a commit, a push and a bumped
+  # pointer in between.
+  umlSrc =
+    let
+      elsewhere = builtins.getEnv "FSWIKI_UML";
+    in
+    if elsewhere != "" then /. + elsewhere else ../user-mode-nixos;
+
+  uml = import (umlSrc + "/lib.nix") { inherit pkgs; };
+
+  guest = uml.mkTest {
+    name = "fswiki-mount";
+    script = ./guest.py;
+    nodes.node = {
+      # /run/wrappers/bin/fusermount3. The mount runs as root here and so does
+      # not need the setuid path, but fswiki-mount unmounts through
+      # fusermount3, and a guest carries no wrappers unless asked.
+      security.enableWrappers = true;
+      programs.fuse.enable = true;
+
+      # Postgres, a pytest, and several mounts at once. The 256M default is for
+      # a guest that boots and pings.
+      boot.uml.memory = "2048M";
+      # /tmp is on the root image, and the cluster lives in /tmp.
+      boot.uml.diskSize = 4096;
+
+      # Who conftest drops to. isNormalUser rather than a system user: initdb
+      # wants a home directory it can write, and a system uid would not be 1000.
+      users.users.pg = {
+        isNormalUser = true;
+        uid = 1000;
+      };
+    };
+    settings = {
+      runner = lib.getExe runner;
+      root = "${src}";
+      # httpx builds an SSL context even for an http:// URL; see `check`.
+      certs = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+    };
+  };
 in
 # The runner is the default -- `nix run --file . tests` -- with the sandboxed
-# build hanging off it as `tests.check`.
-runner // { inherit check; }
+# build and the guest hanging off it.
+runner // { inherit check guest; }

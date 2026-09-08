@@ -68,6 +68,37 @@ for an `http://` URL, so without `SSL_CERT_FILE` every test that uses the client
 dies with a bare `FileNotFoundError` out of `ssl.py`. The check derivation sets
 it.
 
+## The mount half, also in a build
+
+    nix build --file . tests.guest -L
+
+176 tests, about three minutes, in a pure Nix build with no root, no KVM and no
+`unshare` line to remember. What was missing from the sandbox was a `/dev/fuse`,
+and a [User-Mode Linux][uml] guest is a Linux kernel compiled as an ordinary
+program, so it has one of its own.
+
+[uml]: https://github.com/lillecarl/user-mode-nixos
+
+Nothing in the suite was rewritten for it. The guest runs the same
+`fswiki-test`, with `-m mount` rather than `-m 'not mount'`, and that is the
+whole of `test/guest.py`. Two things it does not need to arrange:
+
+- **Root.** The guest is a machine of its own, so we simply are root, which is
+  what a mount wants. Postgres still refuses to be, and conftest already drops
+  `initdb` and `pg_ctl` to uid 1000 — the node only has to make uid 1000 a real
+  user, because `initdb` looks itself up before it does anything else.
+- **A copy of anything.** The host's store reaches the guest over hostfs, so the
+  runner and the checkout are named as store paths and read where they are.
+
+The guest comes from `user-mode-nixos`, which is expected as a submodule at the
+repository root. **It is not registered yet**, so for now say where it is:
+
+    FSWIKI_UML=~/Code/user-mode-nixos nix build --file . tests.guest -L
+
+`FSWIKI_UML` stays useful after the submodule lands, and is what you want while
+changing both projects at once: an edit there is visible here without a commit,
+a push and a bumped pointer in between.
+
 ## What is where
 
 Pure units first — no stack, no network, no mount, milliseconds each:
