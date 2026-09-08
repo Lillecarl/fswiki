@@ -24,8 +24,7 @@ let
   src = lib.cleanSourceWith {
     src = ../.;
     filter =
-      path: type:
-      baseNameOf (toString path) != "user-mode-nixos" && lib.cleanSourceFilter path type;
+      path: type: baseNameOf (toString path) != "user-mode-nixos" && lib.cleanSourceFilter path type;
   };
 
   fswiki-core = pkgs.callPackage ../core { };
@@ -269,113 +268,196 @@ let
   # provider's tokens, and dex answers it as one Go binary with its storage in
   # memory: it is up in about a second and costs a few tens of megabytes. A JVM
   # and a realm import would answer the same question a hundred times slower.
+  # The wiki the module deploys is empty: `migrate` loads schema/seed, which
+  # builds the root document and the built-in roles and nothing else. There is
+  # no bob and no engineering tree in a real deployment, and both guests need
+  # somebody to be.
+  #
+  # These are the two files the rest of the suite uses, named as store paths and
+  # read over hostfs, so "bob reads root.engineering" means the same thing in a
+  # guest as it does in test_client.py.
+  fixtures = {
+    fixtures = "${src}/server/test/010_fixtures.sql";
+    seed = "${src}/dev/seed.sql";
+  };
+
+  # One machine, two tests. `integration` asks whether the units come up and
+  # agree; `browser` asks the same machine to be logged into. Sharing the
+  # definition is what keeps the second from quietly drifting into testing a
+  # different deployment from the first.
+  deployed = {
+    imports = [ ../nix/module.nix ];
+    nixpkgs.overlays = [ (import ../nix/overlay.nix) ];
+
+    # Defaults, because `browser` below wants more of the first.
+    boot.uml.memory = lib.mkDefault "2048M";
+    boot.uml.diskSize = lib.mkDefault 4096;
+
+    # Reachable from the host, at an address fixed rather than handed out.
+    #
+    # `browser` drives a browser on the host against these ports, and dex
+    # compares a redirect_uri exactly -- so the address it will be reached at
+    # has to be known when dex is configured, which is before anything boots.
+    #
+    # All of 127.0.0.0/8 is on `lo` without anyone configuring it, on the host
+    # and in the guest alike. That is what lets one URL mean the same thing
+    # from both sides.
+    boot.uml.forward = [
+      {
+        address = "127.0.0.2";
+        ports = "all";
+      }
+    ];
+
+    environment.systemPackages = [
+      pkgs.curl
+      pkgs.jq
+    ];
+
+    # The test looks at the cluster from outside the program -- who is
+    # connected, and what they may do -- and it runs as root, which peer
+    # authentication maps to the database user `root` and nothing else. sudo
+    # is not the way in: a guest has no PAM stack worth the name, and
+    # `sudo -u postgres` fails with "authentication service cannot retrieve
+    # authentication info" rather than with anything about permissions.
+    #
+    # An ident map is. Before the module's own, because pg_hba stops at the
+    # first match -- and that is also why postgres must be mapped to itself
+    # here: the line below is now the one NixOS's own setup scripts match, and
+    # a map that named only root would lock them out of their own cluster.
+    # They do not fail when that happens, they retry, so it reads as
+    # "PostgreSQL Setup Scripts (13s / no limit)" and never ends.
+    services.postgresql.identMap = lib.mkBefore ''
+      fswiki-test root     postgres
+      fswiki-test postgres postgres
+    '';
+    services.postgresql.authentication = lib.mkBefore ''
+      local all postgres peer map=fswiki-test
+    '';
+
+    services.fswiki = {
+      enable = true;
+      # 0.0.0.0 covers 127.0.0.2, which is what passt forwards to. Loopback is
+      # still the only way in: the guest has no other interface a host could
+      # reach it on.
+      host = "0.0.0.0";
+      postgrest = {
+        # dex publishes its keys here, and the unit waits for them.
+        jwksFrom = "http://127.0.0.2:5556/dex/keys";
+        # An identity provider says which groups somebody is in. Which
+        # Postgres role that should become is not a thing it knows, so this
+        # is where the two are joined.
+        roleClaimKey = ".groups[0]";
+      };
+    };
+
+    services.dex = {
+      enable = true;
+      settings = {
+        # The address a browser on the host reaches it at. dex builds its own
+        # absolute URLs from this -- the form action, the redirect -- so an
+        # issuer naming 127.0.0.1 would send that browser to its own loopback,
+        # where nothing is listening.
+        issuer = "http://127.0.0.2:5556/dex";
+        # In memory, because this provider exists for the length of one test
+        # and a file would only be something to clean up.
+        storage.type = "memory";
+        web.http = "0.0.0.0:5556";
+        oauth2.passwordConnector = "local";
+        enablePasswordDB = true;
+        staticClients = [
+          {
+            id = "fswiki";
+            name = "fswiki";
+            secret = "fswiki-test-secret";
+            # Exactly what the browser will send, because dex compares it
+            # exactly. fswiki answers /callback with a 404 -- there is no
+            # login yet -- and the URL is the point rather than the page.
+            redirectURIs = [ "http://127.0.0.2:8080/callback" ];
+          }
+        ];
+        staticPasswords = [
+          {
+            email = "bob@test.invalid";
+            # bcrypt of "hunter2". dex takes a hash and never a password, and
+            # rejects a cost below 10, so this is what a static user looks
+            # like even in a test.
+            hash = "$2b$10$LeqL5/urOiX.HE7ftw1xCukjWNePRR/78px/6qWP4xLekq8XxqHHe";
+            username = "bob";
+            userID = "bob-at-dex";
+            # What becomes the `groups` claim, and so -- through
+            # roleClaimKey above -- the database role. The second group is
+            # here to keep the first from being the only one: `.groups[0]`
+            # has to pick, and a list of one would not show that it does.
+            #
+            # storage.Password carries these and connectors/password.go
+            # hands them to the identity verbatim, so a password grant gets
+            # them like any other flow. dex's own
+            # server_grant_password_test.go asserts exactly that.
+            groups = [
+              "fswiki_user"
+              "engineering"
+            ];
+          }
+        ];
+      };
+    };
+  };
+
+  # Do the units come up, agree with each other, and serve a real token?
+  #
+  #   nix build --file . tests.integration -L
+  #
+  # dex rather than Keycloak. The question is whether fswiki accepts a real
+  # provider's tokens, and dex answers it as one Go binary with its storage in
+  # memory: it is up in about a second and costs a few tens of megabytes. A JVM
+  # and a realm import would answer the same question a hundred times slower.
   integration = uml.mkTest {
     name = "fswiki-integration";
     script = ./integration.py;
-    settings = {
-      # The wiki the module deploys is empty: `migrate` loads schema/seed,
-      # which builds the root document and the built-in roles and nothing else.
-      # There is no bob and no engineering tree in a real deployment, and the
-      # test needs somebody to be.
-      #
-      # These are the two files the rest of the suite uses, named as store paths
-      # and read over hostfs, so "bob reads root.engineering" means the same
-      # thing here as it does in test_client.py.
-      fixtures = "${src}/server/test/010_fixtures.sql";
-      seed = "${src}/dev/seed.sql";
+    settings = fixtures;
+    nodes.node = deployed;
+  };
+
+  # And can a person log in?
+  #
+  #   nix build --file . tests.browser -L
+  #
+  # The half a password grant skips: dex's authorization endpoint, its login
+  # page, consent, and a redirect carrying a code. A real browser, a real form.
+  #
+  # fswiki neither starts that flow nor handles the callback -- there is no
+  # login yet, see docs/oidc.md -- so the script is the relying party and
+  # exchanges the code itself, then puts the token in the `fswiki_session`
+  # cookie the server already reads. dex's redirect lands on /callback, which
+  # the wiki answers with a 404 whose URL is the point.
+  #
+  # When there is a login, the exchange moves into the server and the browser
+  # half of this stays as it is.
+  browser = uml.mkTest {
+    name = "fswiki-browser";
+    script = ./browser.py;
+    settings = fixtures // {
+      script = "${./browser_login.py}";
+      python = pkgs.python3.withPackages (ps: [ ps.playwright ]);
+      browsers = "${pkgs.playwright-driver.browsers}";
     };
     nodes.node = {
-      imports = [ ../nix/module.nix ];
-      nixpkgs.overlays = [ (import ../nix/overlay.nix) ];
-
-      boot.uml.memory = "2048M";
-      boot.uml.diskSize = 4096;
-
-      environment.systemPackages = [
-        pkgs.curl
-        pkgs.jq
-      ];
-
-      # The test looks at the cluster from outside the program -- who is
-      # connected, and what they may do -- and it runs as root, which peer
-      # authentication maps to the database user `root` and nothing else. sudo
-      # is not the way in: a guest has no PAM stack worth the name, and
-      # `sudo -u postgres` fails with "authentication service cannot retrieve
-      # authentication info" rather than with anything about permissions.
-      #
-      # An ident map is. Before the module's own, because pg_hba stops at the
-      # first match -- and that is also why postgres must be mapped to itself
-      # here: the line below is now the one NixOS's own setup scripts match, and
-      # a map that named only root would lock them out of their own cluster.
-      # They do not fail when that happens, they retry, so it reads as
-      # "PostgreSQL Setup Scripts (13s / no limit)" and never ends.
-      services.postgresql.identMap = lib.mkBefore ''
-        fswiki-test root     postgres
-        fswiki-test postgres postgres
-      '';
-      services.postgresql.authentication = lib.mkBefore ''
-        local all postgres peer map=fswiki-test
-      '';
-
-      services.fswiki = {
-        enable = true;
-        postgrest = {
-          # dex publishes its keys here, and the unit waits for them.
-          jwksFrom = "http://127.0.0.1:5556/dex/keys";
-          # An identity provider says which groups somebody is in. Which
-          # Postgres role that should become is not a thing it knows, so this
-          # is where the two are joined.
-          roleClaimKey = ".groups[0]";
-        };
-      };
-
-      services.dex = {
-        enable = true;
-        settings = {
-          issuer = "http://127.0.0.1:5556/dex";
-          # In memory, because this provider exists for the length of one test
-          # and a file would only be something to clean up.
-          storage.type = "memory";
-          web.http = "127.0.0.1:5556";
-          oauth2.passwordConnector = "local";
-          enablePasswordDB = true;
-          staticClients = [
-            {
-              id = "fswiki";
-              name = "fswiki";
-              secret = "fswiki-test-secret";
-              redirectURIs = [ "http://127.0.0.1:8080/callback" ];
-            }
-          ];
-          staticPasswords = [
-            {
-              email = "bob@test.invalid";
-              # bcrypt of "hunter2". dex takes a hash and never a password, and
-              # rejects a cost below 10, so this is what a static user looks
-              # like even in a test.
-              hash = "$2b$10$LeqL5/urOiX.HE7ftw1xCukjWNePRR/78px/6qWP4xLekq8XxqHHe";
-              username = "bob";
-              userID = "bob-at-dex";
-              # What becomes the `groups` claim, and so -- through
-              # roleClaimKey above -- the database role. The second group is
-              # here to keep the first from being the only one: `.groups[0]`
-              # has to pick, and a list of one would not show that it does.
-              #
-              # storage.Password carries these and connectors/password.go
-              # hands them to the identity verbatim, so a password grant gets
-              # them like any other flow. dex's own
-              # server_grant_password_test.go asserts exactly that.
-              groups = [
-                "fswiki_user"
-                "engineering"
-              ];
-            }
-          ];
-        };
-      };
+      imports = [ deployed ];
+      # Chromium is the reason. It is a browser, and the 2 GB the other guest
+      # runs on is Postgres and a JVM-free provider and nothing else.
+      boot.uml.memory = "4096M";
     };
   };
 in
 # The runner is the default -- `nix run --file . tests` -- with the sandboxed
-# build and the two guests hanging off it.
-runner // { inherit check guest integration; }
+# build and the three guests hanging off it.
+runner
+// {
+  inherit
+    check
+    guest
+    integration
+    browser
+    ;
+}

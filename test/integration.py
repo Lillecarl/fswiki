@@ -28,7 +28,10 @@ READY = 120
 
 WIKI = "http://127.0.0.1:8080"
 REST = "http://127.0.0.1:3000"
-DEX = "http://127.0.0.1:5556/dex"
+# 127.0.0.2 rather than 127.0.0.1: dex answers on both inside the guest,
+# and this is the address it calls itself, so `iss` matches what a browser
+# on the host would be given. See the forward in test/default.nix.
+DEX = "http://127.0.0.2:5556/dex"
 
 
 async def curl(vm, args: str, *, timeout: float = 30) -> str:
