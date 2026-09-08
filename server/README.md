@@ -76,7 +76,7 @@ mount talk to it directly. This program only owns its lifetime.
 
 | variable | |
 | --- | --- |
-| `FSWIKI_DATABASE_URL` | required; needs DDL rights, for the migrate phase |
+| `FSWIKI_DATABASE_URL` | required; for the migrate phase, so it needs DDL — **and `CREATEROLE`**, because `tables/060_roles.sql` creates `fswiki_anon`, `fswiki_user` and `fswiki_authenticator`. A role is a cluster object, so owning the database is not enough. Create the three by hand instead if you would rather not grant it: each is guarded with `if not exists` |
 | `FSWIKI_POSTGREST_DATABASE_URL` | what PostgREST connects as. Should be `fswiki_authenticator` — an owner is not subject to RLS, so a PostgREST connected as the tables' owner bypasses every policy while looking healthy |
 | `FSWIKI_SCHEMA_DIR` | where the `.sql` files are; the package ships them |
 | `FSWIKI_HOST`, `FSWIKI_PORT` | this server |
