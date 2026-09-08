@@ -202,6 +202,10 @@ measurements that settled them.
 - [docs/attachments.md](docs/attachments.md) — why a file is a *revision*,
   where the size limit lives, what a browser is told about a file somebody else
   uploaded, and where a storage backend would plug in.
+- [docs/oidc.md](docs/oidc.md) — why verifying a token and identifying its
+  holder are two questions, why no identity provider can name a database role,
+  and why a request that must be anonymous has to carry no identity rather than
+  a smaller role.
 
 ## Status
 
