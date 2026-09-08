@@ -229,10 +229,8 @@ let
     name = "fswiki-mount";
     script = ./guest.py;
     nodes.node = {
-      # /run/wrappers/bin/fusermount3. The mount runs as root here and so does
-      # not need the setuid path, but fswiki-mount unmounts through
-      # fusermount3, and a guest carries no wrappers unless asked.
-      security.enableWrappers = true;
+      # fusermount3, which fswiki-mount unmounts through. programs.fuse is
+      # what puts it under /run/wrappers, and it is opt in on NixOS.
       programs.fuse.enable = true;
 
       # Postgres, a pytest, and several mounts at once. The 256M default is for
@@ -255,7 +253,129 @@ let
       certs = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
     };
   };
+
+  # The whole thing, deployed.
+  #
+  #   nix build --file . tests.integration -L
+  #
+  # A machine running the units a deployment runs -- postgresql, an identity
+  # provider, and `services.fswiki` from nix/module.nix -- rather than a stack a
+  # fixture built. What that reaches is everything the module decides: peer
+  # authentication with one OS user arriving as two database users, a JWKS
+  # fetched from a provider that is still starting, and the ordering of the
+  # three, which nothing but systemd arranges.
+  #
+  # dex rather than Keycloak. The question is whether fswiki accepts a real
+  # provider's tokens, and dex answers it as one Go binary with its storage in
+  # memory: it is up in about a second and costs a few tens of megabytes. A JVM
+  # and a realm import would answer the same question a hundred times slower.
+  integration = uml.mkTest {
+    name = "fswiki-integration";
+    script = ./integration.py;
+    settings = {
+      # The wiki the module deploys is empty: `migrate` loads schema/seed,
+      # which builds the root document and the built-in roles and nothing else.
+      # There is no bob and no engineering tree in a real deployment, and the
+      # test needs somebody to be.
+      #
+      # These are the two files the rest of the suite uses, named as store paths
+      # and read over hostfs, so "bob reads root.engineering" means the same
+      # thing here as it does in test_client.py.
+      fixtures = "${src}/server/test/010_fixtures.sql";
+      seed = "${src}/dev/seed.sql";
+    };
+    nodes.node = {
+      imports = [ ../nix/module.nix ];
+      nixpkgs.overlays = [ (import ../nix/overlay.nix) ];
+
+      boot.uml.memory = "2048M";
+      boot.uml.diskSize = 4096;
+
+      environment.systemPackages = [
+        pkgs.curl
+        pkgs.jq
+      ];
+
+      # The test looks at the cluster from outside the program -- who is
+      # connected, and what they may do -- and it runs as root, which peer
+      # authentication maps to the database user `root` and nothing else. sudo
+      # is not the way in: a guest has no PAM stack worth the name, and
+      # `sudo -u postgres` fails with "authentication service cannot retrieve
+      # authentication info" rather than with anything about permissions.
+      #
+      # An ident map is. Before the module's own, because pg_hba stops at the
+      # first match -- and that is also why postgres must be mapped to itself
+      # here: the line below is now the one NixOS's own setup scripts match, and
+      # a map that named only root would lock them out of their own cluster.
+      # They do not fail when that happens, they retry, so it reads as
+      # "PostgreSQL Setup Scripts (13s / no limit)" and never ends.
+      services.postgresql.identMap = lib.mkBefore ''
+        fswiki-test root     postgres
+        fswiki-test postgres postgres
+      '';
+      services.postgresql.authentication = lib.mkBefore ''
+        local all postgres peer map=fswiki-test
+      '';
+
+      services.fswiki = {
+        enable = true;
+        postgrest = {
+          # dex publishes its keys here, and the unit waits for them.
+          jwksFrom = "http://127.0.0.1:5556/dex/keys";
+          # An identity provider says which groups somebody is in. Which
+          # Postgres role that should become is not a thing it knows, so this
+          # is where the two are joined.
+          roleClaimKey = ".groups[0]";
+        };
+      };
+
+      services.dex = {
+        enable = true;
+        settings = {
+          issuer = "http://127.0.0.1:5556/dex";
+          # In memory, because this provider exists for the length of one test
+          # and a file would only be something to clean up.
+          storage.type = "memory";
+          web.http = "127.0.0.1:5556";
+          oauth2.passwordConnector = "local";
+          enablePasswordDB = true;
+          staticClients = [
+            {
+              id = "fswiki";
+              name = "fswiki";
+              secret = "fswiki-test-secret";
+              redirectURIs = [ "http://127.0.0.1:8080/callback" ];
+            }
+          ];
+          staticPasswords = [
+            {
+              email = "bob@test.invalid";
+              # bcrypt of "hunter2". dex takes a hash and never a password, and
+              # rejects a cost below 10, so this is what a static user looks
+              # like even in a test.
+              hash = "$2b$10$LeqL5/urOiX.HE7ftw1xCukjWNePRR/78px/6qWP4xLekq8XxqHHe";
+              username = "bob";
+              userID = "bob-at-dex";
+              # What becomes the `groups` claim, and so -- through
+              # roleClaimKey above -- the database role. The second group is
+              # here to keep the first from being the only one: `.groups[0]`
+              # has to pick, and a list of one would not show that it does.
+              #
+              # storage.Password carries these and connectors/password.go
+              # hands them to the identity verbatim, so a password grant gets
+              # them like any other flow. dex's own
+              # server_grant_password_test.go asserts exactly that.
+              groups = [
+                "fswiki_user"
+                "engineering"
+              ];
+            }
+          ];
+        };
+      };
+    };
+  };
 in
 # The runner is the default -- `nix run --file . tests` -- with the sandboxed
-# build and the guest hanging off it.
-runner // { inherit check guest; }
+# build and the two guests hanging off it.
+runner // { inherit check guest integration; }
