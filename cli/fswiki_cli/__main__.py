@@ -1,6 +1,7 @@
 """fswiki — publish the drafts you made through the mount.
 
     fswiki status                 what you have pending
+    fswiki search quokkas         find pages you may read
     fswiki diff                   what would change
     fswiki push -m "message"      publish all of it
     fswiki revert                 throw a draft away
@@ -24,7 +25,7 @@ from pathlib import Path
 
 import anyio
 
-from fswiki_core import merge, naming, render
+from fswiki_core import merge, naming, pages, render
 from fswiki_core.client import Client, PostgrestError, Unreachable
 
 from . import paths, preview, report
@@ -69,6 +70,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          help="rewrite the drafts; without it, only report")
     p_merge.add_argument("--abort", action="store_true",
                          help="restore the drafts as they were before merging")
+
+    p_search = sub.add_parser(
+        "search", help="find pages, filtered by what you may read")
+    # Quote the whole query to exclude a word. argparse reads a bare `-laptop`
+    # as an option and refuses it, and `--` before the terms works but is worse
+    # to explain than a pair of quotes.
+    p_search.add_argument("terms", nargs="+",
+                          help="bare words, or a quoted query: "
+                               "'\"a phrase\"', 'onboarding -laptop', 'a or b'")
+    p_search.add_argument("-n", "--limit", type=int, default=20,
+                          help="how many results (default: %(default)s, "
+                               "capped at 100 by the server)")
+    p_search.add_argument("--published", action="store_true",
+                          help="ignore your drafts and search what is published")
 
     p_render = sub.add_parser(
         "render", help="render a document to HTML")
@@ -182,6 +197,13 @@ async def run(args: argparse.Namespace) -> int:
         if args.command == "detach":
             return await _detach(client, args.path)
 
+        # Beside the two above rather than below the draft list: search asks
+        # the server for its own results, and folding drafts in asks a second
+        # RPC rather than reading `drafts`. The list would be fetched and
+        # thrown away.
+        if args.command == "search":
+            return await _search(client, args)
+
         drafts = await client.drafts()
 
         if args.command == "render":
@@ -260,6 +282,27 @@ async def run(args: argparse.Namespace) -> int:
         return 0 if ok else 1
     finally:
         await client.aclose()
+
+
+async def _search(client: Client, args: argparse.Namespace) -> int:
+    """Find pages, folding this author's own drafts in by default.
+
+    `--published` is the same flag `preview` has and means the same thing,
+    because the reason is the same: a draft is what its author sees in the
+    mount, in `status` and on the page, so a search that could not find what
+    they wrote an hour ago would be the odd one out. `pages.fold_drafts` is
+    shared with the preview server so the two cannot drift.
+
+    A `search` that comes back empty is a zero exit. Nothing failed -- the wiki
+    was asked a question and answered it.
+    """
+    terms = " ".join(args.terms)
+    rows = await client.search(terms, limit=args.limit)
+    drafts = ([] if args.published
+              else await client.search(terms, limit=args.limit, drafts=True))
+    print(report.render_search(pages.fold_drafts(rows, drafts, limit=args.limit),
+                               terms))
+    return 0
 
 
 async def _show(client: Client, raw_path: str) -> int:

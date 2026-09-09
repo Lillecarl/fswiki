@@ -457,3 +457,91 @@ def test_reverts_are_sorted_and_pluralised():
                                applied=False)
     assert "2 changes would be withdrawn" in out
     assert out.index("apple") < out.index("zebra")
+
+
+# --- search ----------------------------------------------------------------
+
+MARK_OPEN, MARK_CLOSE = "\x02", "\x03"
+
+
+def found(path="root.eng.guide", excerpt="", **extra):
+    return {"path": path, "excerpt": excerpt, "state": None, **extra}
+
+
+def test_nothing_found_says_so_and_says_nothing_else():
+    """The wording matters more here than anywhere else in this file. It is
+    also the answer for a word that is only in a page this reader may not open,
+    so a count or a hint would be a disclosure rather than a courtesy."""
+    assert report.render_search([], "locked") == "Nothing here matches that."
+
+
+def test_one_result_is_singular_and_two_are_not():
+    assert "1 result for" in report.render_search([found()], "guide")
+    assert "2 results for" in report.render_search(
+        [found(path="root.a"), found(path="root.b")], "guide")
+
+
+def test_the_path_is_printed_the_way_a_person_writes_it():
+    out = report.render_search([found(path="root.eng.guide")], "guide")
+    assert "eng/guide" in out
+    assert "root.eng.guide" not in out
+
+
+def test_the_excerpt_is_under_its_path():
+    out = report.render_search([found(excerpt="some words")], "words")
+    assert out.index("eng/guide") < out.index("some words")
+
+
+def test_a_result_with_no_excerpt_prints_no_empty_line():
+    out = report.render_search([found(excerpt="")], "guide")
+    assert "\n    \n" not in out
+
+
+def test_a_draft_is_labelled_as_one():
+    out = report.render_search([found(state="draft")], "guide")
+    assert "draft" in out
+
+
+def test_a_published_result_is_not_labelled():
+    assert "draft" not in report.render_search([found()], "guide")
+
+
+def test_the_terms_are_quoted_back_so_a_scrollback_reads():
+    assert "'small marsupial'" in report.render_search([found()], "small marsupial")
+
+
+# --- the excerpt, on one line ----------------------------------------------
+
+def test_the_markers_never_reach_the_terminal():
+    """A terminal does not escape. A control character that survived would be
+    written to somebody's screen and do whatever their emulator does."""
+    out = report.excerpt_line(MARK_OPEN + "match" + MARK_CLOSE + " rest")
+    assert MARK_OPEN not in out and MARK_CLOSE not in out
+    assert out == "match rest"
+
+
+def test_an_excerpt_is_one_line_however_the_document_was_written():
+    """`ts_headline` keeps the newlines the document had. An excerpt that wraps
+    a paragraph of Markdown is not context."""
+    out = report.excerpt_line("first\n\nsecond\tthird   fourth")
+    assert out == "first second third fourth"
+
+
+def test_an_unbalanced_marker_is_not_the_terminal_s_problem():
+    assert report.excerpt_line(MARK_OPEN + "rest") == "rest"
+    assert report.excerpt_line("rest" + MARK_CLOSE) == "rest"
+
+
+def test_an_empty_excerpt_is_empty_rather_than_whitespace():
+    assert report.excerpt_line("   \n  ") == ""
+    assert report.excerpt_line(None) == ""
+
+
+def test_the_match_is_emphasised_when_colour_is_on():
+    report.colour(enabled=True)
+    try:
+        out = report.excerpt_line("a " + MARK_OPEN + "word" + MARK_CLOSE + " here")
+        assert "\033[1mword\033[0m" in out
+        assert "\033[" not in out.replace("\033[1m", "").replace("\033[0m", "")
+    finally:
+        report.colour(enabled=False)

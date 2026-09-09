@@ -1,6 +1,6 @@
 """Search: what a reader finds, and what search must never tell them.
 
-Two halves.
+Three parts.
 
 `excerpt_html` is pure and needs nothing, so it is tested first and hardest.
 It is the one place in this project where text from `wiki.search` becomes
@@ -14,6 +14,10 @@ already proves that over the cross product -- but that nothing between the
 database and the browser widens it. A count, a "3 results you cannot see", or
 a route that answers differently for a hidden page would each be a disclosure
 the SQL suite cannot see from where it stands.
+
+The last part asks the same questions of `fswiki search`, because a second
+interface is a second chance to widen something -- and an exit code is a thing
+a script branches on, which a web page does not have.
 """
 
 from __future__ import annotations
@@ -400,3 +404,76 @@ async def test_the_reserved_prefix_still_refuses_what_it_does_not_serve(browser)
 async def test_a_very_long_query_is_answered_rather_than_refused(browser, stack):
     r = await find(browser, "word " * 500, who="bob", stack=stack)
     assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# The same questions, asked from a terminal
+# ---------------------------------------------------------------------------
+#
+# The CLI reaches `wiki.search` through the same client the browser server
+# uses, so the SQL is not on trial again here. What is on trial is that the
+# second interface did not widen anything -- an exit code, a count or a wording
+# that differs between "no such word" and "a word you may not read" would be
+# the same disclosure the route above is careful about, arriving by a door
+# nobody was watching.
+#
+# Every one takes `clean`, because `search` folds this author's own drafts in.
+# A draft another test file left behind would be a result here, and the two
+# runs the oracle test compares would stop being comparable.
+
+def test_the_cli_finds_a_page_its_reader_may_read(cli, clean):
+    r = cli("search", "onboarding")
+    assert r.code == 0 and "engineering/onboarding" in r
+
+
+def test_the_cli_shows_the_excerpt_with_no_markers_in_it(cli, quokkas, clean):
+    """STX and ETX reaching a terminal would be written to somebody's screen
+    verbatim. `excerpt_line` is what stops that."""
+    r = cli("search", "quokkas")
+    assert "small marsupial" in r
+    assert MARK_OPEN not in r.out and MARK_CLOSE not in r.out
+
+
+def test_the_cli_takes_several_words_as_one_query(cli, quokkas, clean):
+    r = cli("search", "small", "marsupial")
+    assert r.code == 0 and "public/quokkas" in r
+
+
+def test_a_quoted_query_can_exclude_a_word(cli, quokkas, clean):
+    """`websearch_to_tsquery` reads `-word` as an exclusion. It has to arrive
+    as one argument: argparse reads a bare `-marsupial` as an option and
+    refuses it, which is why the help says to quote the query."""
+    kept = cli("search", "quokkas")
+    dropped = cli("search", "quokkas -marsupial")
+    assert "public/quokkas" in kept
+    assert "public/quokkas" not in dropped.out
+
+
+def test_the_cli_finds_nothing_and_that_is_not_a_failure(cli, clean):
+    """An empty result is an answer. A non-zero exit would put it in the same
+    class as an unreachable server, which is what a script would branch on."""
+    r = cli("search", "zzzunwrittenword")
+    assert r.code == 0
+    assert "Nothing here matches that." in r
+
+
+def test_the_cli_refuses_a_page_this_reader_may_not_read(cli, clean):
+    r = cli("search", "locked", user="bob")
+    assert "locked" not in r.out
+
+
+def test_but_its_reader_finds_it_from_the_terminal_too(cli, clean):
+    """The other half of the two above. Without it they would both pass
+    against a `search` that simply returns nothing."""
+    r = cli("search", "locked", user="alice")
+    assert r.code == 0 and "1 result" in r and "locked" in r
+
+
+def test_the_cli_answers_a_refused_word_exactly_like_an_unwritten_one(cli, clean):
+    """The oracle test again, one interface along. The terms are echoed in the
+    heading of a result list, and there is no result list here, so the two
+    outputs are comparable in full."""
+    refused = cli("search", "locked", user="bob")
+    nonsense = cli("search", "zzzunwrittenword", user="bob")
+    assert refused.out == nonsense.out
+    assert refused.code == nonsense.code

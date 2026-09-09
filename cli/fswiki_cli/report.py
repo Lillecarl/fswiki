@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import difflib
+import re
 
 from fswiki_core import merge as merge3way
+from fswiki_core import pages
 
 from . import paths
 
@@ -320,6 +322,52 @@ def _lost(draft: dict, published: str | None) -> str:
     base = draft.get("base_version")
     return (f"{changed} changed line{'s' if changed != 1 else ''} "
             f"against revision {base}")
+
+
+def excerpt_line(text: str) -> str:
+    """One search excerpt on one line, with the matches emphasised.
+
+    The markers are `wiki.search`'s STX and ETX, and `pages.excerpt_parts` is
+    what makes sense of them -- including when a document holds one of its own.
+    The balancing is not repeated here on purpose: a terminal and a browser
+    disagreeing about a hostile excerpt is exactly the bug that argument
+    prevents.
+
+    Whitespace collapses first, because `ts_headline` keeps the newlines the
+    document had. An excerpt is one line of context, and one that wraps a
+    paragraph of Markdown is not context.
+    """
+    parts = pages.excerpt_parts(re.sub(r"\s+", " ", text or ""))
+    return "".join(bold(run) if hit else run for run, hit in parts).strip()
+
+
+def render_search(rows: list[dict], terms: str) -> str:
+    """The results, or the one answer that is always the same answer.
+
+    "Nothing matches" has to read identically for a word nobody wrote and for a
+    word that is only in a page this reader may not open. A count of hidden
+    matches would turn the command into an oracle over the whole wiki, one word
+    at a time, which is what `Pages.search_page` is careful about one interface
+    along. So there is no count here either.
+    """
+    if not rows:
+        return "Nothing here matches that."
+
+    n = len(rows)
+    lines = [bold(f"{n} result{'s' if n != 1 else ''} for {terms!r}:"), ""]
+    for row in rows:
+        state = yellow("  draft") if row.get("state") == "draft" else ""
+        lines.append(f"  {paths.to_display(row['path'])}{state}")
+        excerpt = excerpt_line(row.get("excerpt") or "")
+        if excerpt:
+            # Not dimmed. The matches inside it are already bold, and an
+            # escape sequence that resets in the middle of a dimmed line
+            # leaves half of it bright -- so the emphasis is the only colour
+            # here, which is also the only thing worth looking at.
+            lines.append(f"    {excerpt}")
+    lines.append("")
+    lines.append(dim("Read one with: fswiki show <path>"))
+    return "\n".join(lines)
 
 
 def render_revert(entries: list[tuple[dict, str | None]], *, applied: bool) -> str:
