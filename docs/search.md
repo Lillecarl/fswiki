@@ -179,11 +179,35 @@ HTML would arrive at a browser as markup somebody else wrote.
 
 They are **STX and ETX**, two control characters no HTML parser will ever act
 on. `pages.excerpt_html` escapes everything around them and only then turns
-them into `<mark>`. It is a small state machine rather than two `replace`
-calls, so the output is balanced whatever the input was: an author who types a
-STX into a page would otherwise open a highlight that never closes and tint
-the rest of the results list. The worst they achieve is a highlight in their
-own excerpt, which is what they asked for.
+them into `<mark>`.
+
+Reading the markers and rendering them are two jobs, and only the second is
+about HTML. `pages.excerpt_parts` does the reading and returns runs of text,
+each flagged as a match or not; `excerpt_html` and the CLI's
+`report.excerpt_line` are both a few lines over it. That is not tidying. The
+markers come out of somebody's document, so they are not guaranteed to be
+balanced — an author who types a STX would otherwise open a highlight that
+never closes and tint the rest of the results list. One state machine means a
+browser and a terminal cannot disagree about what a hostile excerpt says. The
+worst that author achieves is a highlight in their own excerpt, which is what
+they asked for.
+
+## Two interfaces, one answer
+
+    fswiki search quokkas
+
+The CLI reaches the same `wiki.search` through the same client the browser
+server uses, so nothing about the ACL is decided twice.
+
+Drafts fold in by default, and `--published` turns that off. It is the same
+flag `fswiki preview` has, and `pages.fold_drafts` is the same function the
+preview server calls: a draft of a published page wins, because a draft is
+what its author sees in the mount, in `status` and on the page itself. Search
+disagreeing would be search being wrong.
+
+An empty result is exit 0. Nothing failed — the wiki was asked a question and
+answered it. A non-zero exit would put "no such word" in the same class as an
+unreachable server, which is the thing a script branches on.
 
 ## Existence stays secret
 
@@ -195,6 +219,10 @@ matches would turn the search box into an oracle over the whole wiki, one word
 at a time. `test/test_search.py` compares the two responses below the search
 box, because the box echoes the query back and the query is the one thing that
 legitimately differs.
+
+The CLI is held to the same rule, and there the comparison is easier: with no
+results there is no heading, so the two runs are compared whole — output and
+exit code. A second interface is a second chance to widen something.
 
 Timing is not addressed and is not claimed to be. A query that matches many
 hidden pages costs more ACL tests than one that matches none, and that

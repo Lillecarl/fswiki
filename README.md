@@ -81,9 +81,9 @@ develop holes that depend on what you read earlier. See
 | [`server/`](server/) | The schema — documents, versions, drafts, the ACL, the RLS that enforces it — and the server that reads the wiki to a browser. PostgREST in front, no application tier. |
 | [`core/`](core/) | Shared by both clients: the PostgREST client, path naming, the three-way merge, the render pipeline. |
 | [`fuse/`](fuse/) | `fswiki-mount`. The tree, on **trio** — pyfuse3's native backend. |
-| [`cli/`](cli/) | `fswiki`. status, diff, push, revert, merge, render, preview. |
+| [`cli/`](cli/) | `fswiki`. status, diff, push, revert, merge, search, render, preview. |
 | [`dev/`](dev/) | Real Postgres and PostgREST under process-compose. Nothing is mocked. |
-| [`test/`](test/) | 990 tests against all of it, at 91% of the lines. See [test/README.md](test/README.md). |
+| [`test/`](test/) | 1,039 tests against all of it, at 91% of the lines. See [test/README.md](test/README.md). |
 
 ## Running it
 
@@ -94,7 +94,7 @@ of it. No flake, no `nix develop`, nothing to install:
 | --- | --- |
 | `nix run --file . dev` | Postgres + PostgREST under process-compose |
 | `nix run --file . server` | the browser-facing reader, `fswiki-serve` |
-| `nix run --file . cli -- <args>` | `fswiki` — status, diff, push, render, preview |
+| `nix run --file . cli -- <args>` | `fswiki` — status, diff, push, search, render, preview |
 | `nix run --file . fuse -- ~/wiki` | `fswiki-mount` |
 | `nix run --file . tests -- <pytest args>` | the suite |
 | `nix build --file . tests.check -L` | the half of it that runs in a sandbox |
