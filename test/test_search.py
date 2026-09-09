@@ -24,7 +24,8 @@ import httpx
 import pytest
 
 from conftest import ROOT
-from fswiki_core.pages import MARK_CLOSE, MARK_OPEN, excerpt_html
+from fswiki_core.pages import (MARK_CLOSE, MARK_OPEN, excerpt_html,
+                               excerpt_parts, fold_drafts)
 from fswiki_server.app import Application
 from fswiki_server.config import Config
 
@@ -95,6 +96,95 @@ def test_every_shape_of_marker_comes_out_balanced(text):
 
 def test_none_is_not_a_crash():
     assert excerpt_html(None) == ""
+
+
+# ---------------------------------------------------------------------------
+# The runs underneath it, which a terminal renders instead
+# ---------------------------------------------------------------------------
+
+def test_the_runs_carry_the_text_and_whether_it_matched():
+    assert excerpt_parts(mark("a [word] here")) == [
+        ("a ", False), ("word", True), (" here", False)]
+
+
+def test_adjacent_runs_of_the_same_kind_are_one_run():
+    """So no caller has to merge them, and none can forget to."""
+    assert excerpt_parts(mark("[a][b]")) == [("ab", True)]
+
+
+def test_a_stray_open_closes_at_the_end_of_the_excerpt():
+    assert excerpt_parts(MARK_OPEN + "rest") == [("rest", True)]
+
+
+def test_a_stray_close_marks_nothing():
+    assert excerpt_parts("plain" + MARK_CLOSE) == [("plain", False)]
+
+
+def test_markers_are_never_text():
+    """Whatever the shape, no run may contain one. A terminal does not escape,
+    so a marker that survived would be written to somebody's screen."""
+    for text in ["", MARK_OPEN, MARK_CLOSE, MARK_OPEN * 5, MARK_CLOSE * 5,
+                 mark("[nested [inner] outer]"), mark("[a][b][c]")]:
+        for run, _ in excerpt_parts(text):
+            assert MARK_OPEN not in run and MARK_CLOSE not in run
+
+
+def test_the_html_is_built_from_the_same_runs():
+    """Not an implementation detail: it is what stops a terminal and a browser
+    disagreeing about a hostile excerpt."""
+    hostile = mark("<b>[x]</b>")
+    assert excerpt_html(hostile) == "&lt;b&gt;<mark>x</mark>&lt;/b&gt;"
+    assert [run for run, _ in excerpt_parts(hostile)] == ["<b>", "x", "</b>"]
+
+
+# ---------------------------------------------------------------------------
+# Folding drafts in, which the preview and the CLI both do
+# ---------------------------------------------------------------------------
+
+def hit(path, rank=0.5, **extra):
+    return {"path": path, "rank": rank, **extra}
+
+
+def test_published_results_are_marked_as_not_drafts():
+    assert fold_drafts([hit("root.a")], []) == [
+        {"path": "root.a", "rank": 0.5, "state": None}]
+
+
+def test_a_draft_of_a_published_page_replaces_it():
+    """A draft is what its author sees in the mount, in `status` and on the
+    page. Search showing them the published text instead would be search
+    being wrong."""
+    rows = fold_drafts([hit("root.a", 0.9)], [hit("root.a", 0.1)])
+    assert rows == [{"path": "root.a", "rank": 0.1, "state": "draft"}]
+
+
+def test_a_draft_of_a_page_that_is_not_published_is_still_a_result():
+    rows = fold_drafts([hit("root.a")], [hit("root.b")])
+    assert {row["path"] for row in rows} == {"root.a", "root.b"}
+
+
+def test_results_are_ranked_and_ties_break_on_path():
+    rows = fold_drafts([hit("root.z", 0.9), hit("root.b", 0.1),
+                        hit("root.a", 0.1)], [])
+    assert [row["path"] for row in rows] == ["root.z", "root.a", "root.b"]
+
+
+def test_a_row_with_no_rank_sorts_last_rather_than_crashing():
+    rows = fold_drafts([hit("root.a", None), hit("root.b", 0.1)], [])
+    assert [row["path"] for row in rows] == ["root.b", "root.a"]
+
+
+def test_the_limit_applies_after_the_fold():
+    """Both halves come back with `limit` rows each, so the union is over it."""
+    rows = fold_drafts([hit(f"root.p{i}", 0.9) for i in range(5)],
+                       [hit(f"root.d{i}", 0.9) for i in range(5)], limit=3)
+    assert len(rows) == 3
+
+
+def test_the_inputs_are_not_modified():
+    published = [hit("root.a")]
+    fold_drafts(published, [])
+    assert "state" not in published[0]
 
 
 # ---------------------------------------------------------------------------

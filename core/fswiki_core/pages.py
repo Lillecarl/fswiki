@@ -272,31 +272,68 @@ LAYOUT = {"default": "", "wide": " class=wide"}
 MARK_OPEN, MARK_CLOSE = "\x02", "\x03"
 
 
-def excerpt_html(text: str) -> str:
-    """One search excerpt, escaped, with the matches marked.
+def excerpt_parts(text: str) -> list[tuple[str, bool]]:
+    """One search excerpt, split into runs, each flagged as a match or not.
 
-    A small state machine rather than two `replace` calls, so the output is
-    balanced whatever the input was. An author who types a STX into a page
-    would otherwise open a `<mark>` that never closes and tint the rest of the
-    results list; here the worst they achieve is a highlight in their own
-    excerpt, which is what they asked for.
+    A small state machine rather than two `replace` calls, because the markers
+    come out of somebody's document and are not guaranteed to be balanced. An
+    author who types a STX would otherwise open a highlight that never closes
+    and tint everything after it. Here a stray open closes at the end of the
+    excerpt, a stray close is dropped, and a second open inside an open one is
+    ignored -- so the worst they achieve is a highlight in their own excerpt,
+    which is what they asked for.
+
+    The balancing lives here rather than in each renderer, so a terminal and a
+    browser cannot disagree about what a hostile excerpt says.
     """
-    out: list[str] = []
+    parts: list[tuple[str, bool]] = []
     marking = False
     for chunk in re.split(f"([{MARK_OPEN}{MARK_CLOSE}])", text or ""):
         if chunk == MARK_OPEN:
-            if not marking:
-                out.append("<mark>")
-                marking = True
+            marking = True
         elif chunk == MARK_CLOSE:
-            if marking:
-                out.append("</mark>")
-                marking = False
-        else:
-            out.append(html.escape(chunk))
-    if marking:
-        out.append("</mark>")
-    return "".join(out)
+            marking = False
+        elif chunk:
+            # Merge with the run before it when the flag has not changed, so a
+            # caller never has to.
+            if parts and parts[-1][1] == marking:
+                parts[-1] = (parts[-1][0] + chunk, marking)
+            else:
+                parts.append((chunk, marking))
+    return parts
+
+
+def excerpt_html(text: str) -> str:
+    """One search excerpt, escaped, with the matches marked.
+
+    The escaping is the whole point of the function. `ts_headline` hands back
+    document text, so everything that keeps a `<script>` out of a results page
+    happens on the line below.
+    """
+    return "".join(f"<mark>{html.escape(run)}</mark>" if hit
+                   else html.escape(run)
+                   for run, hit in excerpt_parts(text))
+
+
+def fold_drafts(published: list[dict], drafts: list[dict], *,
+                limit: int = 20) -> list[dict]:
+    """One result list out of the two `wiki.search` and `wiki.search_drafts`
+    return, with a `state` on every row.
+
+    A draft of a page that is also published wins. A draft is what its author
+    sees everywhere else -- in the mount, in `fswiki status`, on the page
+    itself -- so search disagreeing would be search being wrong.
+
+    Pure, and shared by the preview server and the CLI. Both fold the same two
+    lists, and a person who searched in one and then the other and got a
+    different answer would be right to distrust both.
+    """
+    rows = [dict(row, state="draft") for row in drafts]
+    drafted = {row["path"] for row in rows}
+    rows += [dict(row, state=None) for row in published
+             if row["path"] not in drafted]
+    rows.sort(key=lambda row: (-(row.get("rank") or 0.0), row["path"]))
+    return rows[:limit]
 
 
 def missing_body(path: str) -> str:
@@ -533,15 +570,10 @@ class Pages:
         its author sees everywhere else -- in the mount, in `fswiki status` and
         on the page itself. Search disagreeing would be search being wrong.
         """
-        rows = [dict(row, state=None) for row in
-                await self._client.search(query, limit=limit)]
-        if self._drafts:
-            drafts = [dict(row, state="draft") for row in
-                      await self._client.search(query, limit=limit, drafts=True)]
-            drafted = {row["path"] for row in drafts}
-            rows = drafts + [row for row in rows if row["path"] not in drafted]
-        rows.sort(key=lambda row: (-(row.get("rank") or 0.0), row["path"]))
-        return rows[:limit]
+        rows = await self._client.search(query, limit=limit)
+        drafts = (await self._client.search(query, limit=limit, drafts=True)
+                  if self._drafts else [])
+        return fold_drafts(rows, drafts, limit=limit)
 
     async def search_page(self, query: str) -> str:
         """The results, or the reason there are none -- which is always the same
