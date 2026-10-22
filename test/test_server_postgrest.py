@@ -177,3 +177,45 @@ def test_a_postgrest_that_is_not_installed_says_which_binary(stack):
     )
     with pytest.raises(PostgrestError, match="FSWIKI_POSTGREST_BIN"):
         Postgrest(cfg).start(timeout=5)
+
+
+# --- credentials ------------------------------------------------------------
+
+def _with_url(**extra) -> Config:
+    return Config(database_url="postgres://owner@example.invalid/fswiki",
+                  postgrest_database_url="postgres://fswiki_authenticator@example.invalid/fswiki",
+                  schema_dir=SCHEMA, **extra)
+
+
+def test_it_does_not_inherit_the_owners_libpq_credentials(monkeypatch):
+    """PGPASSWORD applies to whichever user the URI names, so an owner's
+    password handed to the authenticator is a login that fails."""
+    for name in ("PGUSER", "PGPASSWORD", "PGPASSFILE", "PGSERVICE", "PGSERVICEFILE"):
+        monkeypatch.setenv(name, "owner-value")
+    env = environment(_with_url())
+    assert not {"PGUSER", "PGPASSWORD", "PGPASSFILE", "PGSERVICE",
+                "PGSERVICEFILE"} & env.keys()
+
+
+def test_it_keeps_where_the_database_is(monkeypatch):
+    monkeypatch.setenv("PGHOST", "db.internal")
+    monkeypatch.setenv("PGSSLMODE", "require")
+    env = environment(_with_url())
+    assert env["PGHOST"] == "db.internal"
+    assert env["PGSSLMODE"] == "require"
+
+
+def test_it_logs_in_with_its_own_password(monkeypatch):
+    monkeypatch.setenv("PGPASSWORD", "owner-value")
+    assert environment(_with_url(postgrest_password="mine"))["PGPASSWORD"] == "mine"
+    assert environment(_with_url(authenticator_password="set"))["PGPASSWORD"] == "set"
+    assert environment(_with_url(postgrest_password="mine",
+                                 authenticator_password="set"))["PGPASSWORD"] == "mine"
+
+
+def test_without_a_url_of_its_own_nothing_is_taken_away(monkeypatch):
+    """The fallback is the migration URL, which a checkout may complete from
+    the environment."""
+    monkeypatch.setenv("PGPASSWORD", "owner-value")
+    cfg = Config(database_url="postgres:///fswiki", schema_dir=SCHEMA)
+    assert environment(cfg)["PGPASSWORD"] == "owner-value"

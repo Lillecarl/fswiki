@@ -40,6 +40,13 @@ class PostgrestError(Exception):
     """PostgREST would not start, or stopped when it should not have."""
 
 
+# What libpq reads to decide who it is. The migrate phase connects as the
+# owner and may be given these; PostgREST connects as the authenticator and
+# must not inherit them, because PGPASSWORD applies to whatever user the URI
+# names and a PostgREST holding the owner's password fails to log in at all.
+LIBPQ_CREDENTIALS = ("PGUSER", "PGPASSWORD", "PGPASSFILE", "PGSERVICE", "PGSERVICEFILE")
+
+
 def environment(config: Config) -> dict[str, str]:
     """The whole of PostgREST's configuration, as environment.
 
@@ -48,6 +55,14 @@ def environment(config: Config) -> dict[str, str]:
     db-anon-role and db-pre-request -- are somewhere they can be pointed at.
     """
     env = dict(os.environ)
+    # Only with a URL of its own. Without one PostgREST falls back to the
+    # migration URL, which is the checkout case and may rely on these.
+    if config.postgrest_database_url:
+        for name in LIBPQ_CREDENTIALS:
+            env.pop(name, None)
+        password = config.postgrest_password or config.authenticator_password
+        if password:
+            env["PGPASSWORD"] = password
     env.update({
         "PGRST_DB_URI": config.postgrest_db_uri,
         "PGRST_DB_SCHEMAS": "wiki",
