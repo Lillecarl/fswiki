@@ -486,3 +486,36 @@ def test_a_rebuild_that_works_says_so_on_the_channel(copied):
         migrate(copied)
         got = list(listener.notifies(timeout=10, stop_after=1))
     assert [n.payload for n in got] == [PGRST_RELOAD_SCHEMA]
+
+
+# --- the authenticator's password -------------------------------------------
+
+def _authenticator_hash(config: Config) -> str | None:
+    with psycopg.connect(config.database_url, autocommit=True) as c:
+        return c.execute("select rolpassword from pg_authid "
+                         "where rolname = 'fswiki_authenticator'").fetchone()[0]
+
+
+def test_the_authenticator_has_no_password_unless_it_is_given_one(blank):
+    migrate(blank)
+    assert _authenticator_hash(blank) is None
+
+
+def test_a_given_password_is_set_and_a_restart_without_one_keeps_it(blank):
+    from dataclasses import replace
+    # A quote in it, because the statement cannot take a bind parameter and a
+    # literal composed by hand is where that goes wrong.
+    migrate(replace(blank, authenticator_password="it's a secret"))
+    assert _authenticator_hash(blank).startswith("SCRAM-SHA-256$")
+    kept = _authenticator_hash(blank)
+    migrate(blank)
+    assert _authenticator_hash(blank) == kept
+
+
+def test_the_password_comes_from_the_environment():
+    env = {"FSWIKI_DATABASE_URL": "postgres://x", "FSWIKI_SCHEMA_DIR": str(SCHEMA)}
+    assert Config.from_env(env).authenticator_password is None
+    assert Config.from_env(
+        {**env, "FSWIKI_AUTHENTICATOR_PASSWORD": ""}).authenticator_password is None
+    assert Config.from_env(
+        {**env, "FSWIKI_AUTHENTICATOR_PASSWORD": "pw"}).authenticator_password == "pw"

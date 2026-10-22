@@ -47,6 +47,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import psycopg
+from psycopg import sql
 
 from .config import MIGRATION_LOCK, PGRST_CHANNEL, PGRST_RELOAD_SCHEMA, Config
 
@@ -252,6 +253,14 @@ def migrate(config: Config) -> Migration:
                 "on conflict (key) do update set value = excluded.value, "
                 "updated_at = now()",
                 (str(config.max_attachment_bytes),))
+
+        # ALTER ROLE takes no bind parameters, so the literal is composed
+        # client-side. Hashing it first (scram-sha-256) would keep the
+        # plaintext out of log_statement output; that is not done here.
+        if config.authenticator_password is not None:
+            log.info("authenticator password set")
+            conn.execute(sql.SQL("alter role fswiki_authenticator password {}")
+                         .format(sql.Literal(config.authenticator_password)))
 
         # Tell every PostgREST on this database that the runtime half moved.
         #

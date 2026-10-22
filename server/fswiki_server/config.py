@@ -91,6 +91,11 @@ class Config:
     # deploy: a PostgREST connected as the owner of the tables would bypass
     # every policy in 050_rls.sql, because owners are not subject to RLS.
     postgrest_database_url: str | None = None
+    # The authenticator is created without one, because the NixOS module
+    # reaches it over a Unix socket with peer authentication. Over TCP it needs
+    # one, and the password lives in the same Secret the PostgREST URL reads.
+    # None leaves whatever is set, as with max_attachment_bytes.
+    authenticator_password: str | None = None
 
     # Rendered bodies held in this process. The key is immutable -- a
     # revision's content never changes -- so nothing here is ever invalidated,
@@ -137,6 +142,7 @@ class Config:
             postgrest_jwt_secret=e.get("FSWIKI_JWT_SECRET"),
             postgrest_jwt_role_claim_key=e.get("FSWIKI_JWT_ROLE_CLAIM_KEY"),
             postgrest_database_url=e.get("FSWIKI_POSTGREST_DATABASE_URL"),
+            authenticator_password=e.get("FSWIKI_AUTHENTICATOR_PASSWORD") or None,
             render_cache_bytes=int(
                 e.get("FSWIKI_RENDER_CACHE_BYTES", cls.render_cache_bytes)),
             max_attachment_bytes=(
