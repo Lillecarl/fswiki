@@ -1,7 +1,17 @@
 -- 060_roles.sql, the runtime half.
 -- The file header, and the reasoning, are in ../tables/060_roles.sql.
 
-grant fswiki_anon, fswiki_user to fswiki_authenticator;
+-- Skipped when the membership exists. A platform that creates the three roles
+-- itself (CloudNativePG managed roles, with inRoles) makes the owner a stranger
+-- to them, and a GRANT needs ADMIN OPTION even when it would change nothing.
+do $$
+begin
+  if not (pg_has_role('fswiki_authenticator', 'fswiki_anon', 'member')
+          and pg_has_role('fswiki_authenticator', 'fswiki_user', 'member')) then
+    grant fswiki_anon, fswiki_user to fswiki_authenticator;
+  end if;
+end
+$$;
 
 grant usage on schema wiki to fswiki_anon, fswiki_user;
 

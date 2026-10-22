@@ -519,3 +519,32 @@ def test_the_password_comes_from_the_environment():
         {**env, "FSWIKI_AUTHENTICATOR_PASSWORD": ""}).authenticator_password is None
     assert Config.from_env(
         {**env, "FSWIKI_AUTHENTICATOR_PASSWORD": "pw"}).authenticator_password == "pw"
+
+
+# --- a platform that creates the roles ---------------------------------------
+
+def test_roles_made_elsewhere_do_not_stop_an_owner_that_cannot_grant_them(blank, stack):
+    """CloudNativePG creates the three roles and their membership, and the
+    database owner it hands the application is not an admin of any of them."""
+    from dataclasses import replace
+    # Roles are cluster-wide and the shared test cluster may already hold them,
+    # so this creates what is missing and asserts the membership either way.
+    with psycopg.connect(blank.database_url, autocommit=True) as c:
+        c.execute("""
+            do $$ begin
+              if not exists (select from pg_roles where rolname = 'fswiki_anon') then
+                create role fswiki_anon nologin; end if;
+              if not exists (select from pg_roles where rolname = 'fswiki_user') then
+                create role fswiki_user nologin; end if;
+              if not exists (select from pg_roles where rolname = 'fswiki_authenticator') then
+                create role fswiki_authenticator login noinherit; end if;
+              if not exists (select from pg_roles where rolname = 'fswiki_owner') then
+                create role fswiki_owner login; end if;
+            end $$""")
+        c.execute("grant fswiki_anon, fswiki_user to fswiki_authenticator")
+        c.execute(f"alter database {blank.database_url.rsplit('/', 1)[1]} "
+                  "owner to fswiki_owner")
+    owner = replace(blank, database_url=blank.database_url.replace(
+        "postgres@", "fswiki_owner@"))
+    migrate(owner)
+    migrate(owner)
