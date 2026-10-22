@@ -76,8 +76,11 @@ mount talk to it directly. This program only owns its lifetime.
 
 | variable | |
 | --- | --- |
-| `FSWIKI_DATABASE_URL` | required; for the migrate phase, so it needs DDL — **and `CREATEROLE`**, because `tables/060_roles.sql` creates `fswiki_anon`, `fswiki_user` and `fswiki_authenticator`. A role is a cluster object, so owning the database is not enough. Create the three by hand instead if you would rather not grant it: each is guarded with `if not exists` |
-| `FSWIKI_POSTGREST_DATABASE_URL` | what PostgREST connects as. Should be `fswiki_authenticator` — an owner is not subject to RLS, so a PostgREST connected as the tables' owner bypasses every policy while looking healthy |
+| `FSWIKI_DATABASE_URL` | required; for the migrate phase, so it needs DDL — **and `CREATEROLE`**, because `tables/060_roles.sql` creates `fswiki_anon`, `fswiki_user` and `fswiki_authenticator`. A role is a cluster object, so owning the database is not enough. Create the three by hand instead if you would rather not grant it: each is guarded with `if not exists`, and the owner then needs no role rights at all — see [In Kubernetes](#in-kubernetes) |
+| `FSWIKI_POSTGREST_DATABASE_URL` | what PostgREST connects as. Should be `fswiki_authenticator` — an owner is not subject to RLS, so a PostgREST connected as the tables' owner bypasses every policy while looking healthy. With it set, PostgREST loses the migrate phase's `PGUSER`, `PGPASSWORD`, `PGPASSFILE`, `PGSERVICE` and `PGSERVICEFILE` |
+| `FSWIKI_POSTGREST_PASSWORD` | the authenticator's password, given to PostgREST as `PGPASSWORD`. For a platform that owns the role's password. Falls back to `FSWIKI_AUTHENTICATOR_PASSWORD` |
+| `FSWIKI_AUTHENTICATOR_PASSWORD` | the migrate phase sets this password on `fswiki_authenticator` with `ALTER ROLE`, which needs `CREATEROLE`. Unset leaves the password alone. For Postgres reached over TCP where nothing else sets it; the NixOS module uses peer authentication and needs neither |
+| `FSWIKI_POSTGREST_ADMIN_PORT` | binds PostgREST's admin server on `FSWIKI_POSTGREST_HOST`, and `/readyz` asks its `/ready`. Unset leaves it off, and `/readyz` asks the root document |
 | `FSWIKI_SCHEMA_DIR` | where the `.sql` files are; the package ships them |
 | `FSWIKI_HOST`, `FSWIKI_PORT` | this server |
 | `FSWIKI_POSTGREST_HOST`, `FSWIKI_POSTGREST_PORT`, `FSWIKI_POSTGREST_BIN` | that one |
@@ -104,6 +107,69 @@ revisions and does not.
 
 It reads through `current_document`, not `syncable_document`. That is the
 `sync` capability working as documented — see [Sync](#sync) below.
+
+### Probes
+
+| path | answers |
+| --- | --- |
+| `GET /healthz` | 200, with no wiki needed. 503 once the PostgREST child has stopped, so the kubelet restarts a pod whose PostgREST died instead of leaving it to answer 502 |
+| `GET /readyz` | 200 when PostgREST answers, else 503 |
+
+Both come before any wiki path, read no token and record no view. A page named
+`healthz` or `readyz` at the root of the wiki is shadowed.
+
+## In Kubernetes
+
+One pod, one container: this program starts PostgREST as a child. These are
+the facts a manifest needs. They were found by reading the code and the
+solid-kubernetes `torg` component, and none has run on a cluster yet.
+
+**Database roles.** The three roles are cluster objects. On CloudNativePG,
+declare them as managed roles and give the owner no `CREATEROLE`:
+
+| role | login | inherit | in roles |
+| --- | --- | --- | --- |
+| `fswiki_anon` | no | | |
+| `fswiki_user` | no | | |
+| `fswiki_authenticator` | yes | no | `fswiki_anon`, `fswiki_user` |
+
+The migrate phase skips the role grant when the membership exists, because a
+`GRANT` needs `ADMIN OPTION` and the owner has none on roles it did not create.
+It cannot set the authenticator's password for the same reason, so leave
+`FSWIKI_AUTHENTICATOR_PASSWORD` unset and give PostgREST the password CNPG
+generated.
+
+**Extensions.** `ltree`, `pgcrypto` and `btree_gist` are trusted, so the owner
+can create them. Check the image lists them in `pg_available_extensions`, or
+have the platform create them as superuser.
+
+**Environment.**
+
+| variable | value |
+| --- | --- |
+| `FSWIKI_DATABASE_URL` | the owner, with `?sslmode=require` |
+| `FSWIKI_POSTGREST_DATABASE_URL` | `fswiki_authenticator`, same database, with `?sslmode=require` |
+| `FSWIKI_POSTGREST_PASSWORD` | from the authenticator's Secret |
+| `FSWIKI_POSTGREST_BIN` | an absolute path: a scratch image has no `PATH` |
+| `FSWIKI_HOST` | `0.0.0.0`, or `::` on an IPv6-only cluster. The default is loopback |
+| `FSWIKI_POSTGREST_HOST` | `0.0.0.0` or `::` if the CLI and mount reach PostgREST through a route of their own; the default is loopback |
+| `FSWIKI_POSTGREST_ADMIN_PORT` | `3001`. It binds on `FSWIKI_POSTGREST_HOST`, so a pod that does not widen that keeps it off the network |
+| `FSWIKI_JWT_SECRET`, `FSWIKI_JWT_ROLE_CLAIM_KEY` | see [docs/oidc.md](../docs/oidc.md) |
+| `USER`, `HOME` | any name, and `/tmp`: a scratch image has no `/etc/passwd` for libpq or Python to fall back on |
+
+The owner's credentials can arrive as `PGUSER` and `PGPASSWORD`; PostgREST does
+not inherit them once its own URL is set.
+
+**Probes.** Liveness `GET /healthz`, readiness `GET /readyz`, both on
+`FSWIKI_PORT`. Give the startup probe time for the migrate phase.
+
+**Exposure.** PostgREST takes writes and must not be reachable unauthenticated.
+Give it a second port and its own route, and keep the browser port on its own.
+The CLI and the mount talk to PostgREST directly, so a pod that keeps it on
+loopback is readable in a browser and unreachable to both.
+
+**One replica to start.** Two pods starting at once are safe, because the
+migration takes an advisory lock, but the render cache is per process.
 
 ## Three tracks
 
