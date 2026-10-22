@@ -25,6 +25,7 @@ python3Packages.buildPythonPackage {
 
   dependencies = [
     fswiki-core
+    python3Packages.anyio
     python3Packages.psycopg
     python3Packages.uvicorn
     # Both optional to uvicorn and both worth having: the loop and the HTTP

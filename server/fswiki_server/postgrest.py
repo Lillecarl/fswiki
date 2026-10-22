@@ -83,6 +83,9 @@ def environment(config: Config) -> dict[str, str]:
         "PGRST_DB_CHANNEL": PGRST_CHANNEL,
         "PGRST_DB_CHANNEL_ENABLED": "true",
     })
+    if config.postgrest_admin_port is not None:
+        env["PGRST_ADMIN_SERVER_HOST"] = config.postgrest_host
+        env["PGRST_ADMIN_SERVER_PORT"] = str(config.postgrest_admin_port)
     if config.postgrest_jwt_secret:
         env["PGRST_JWT_SECRET"] = config.postgrest_jwt_secret
     # Which claim names the database role. Unset means PostgREST's own default,

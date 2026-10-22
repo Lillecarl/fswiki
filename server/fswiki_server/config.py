@@ -101,6 +101,10 @@ class Config:
     # owns the role's password, and the owner this process migrates as cannot
     # change it. Falls back to authenticator_password.
     postgrest_password: str | None = None
+    # PostgREST's admin server, on postgrest_host. Its /ready is cheaper than
+    # the root document and keeps reporting whether the database is reachable
+    # after startup. None leaves it off, and readiness asks the root instead.
+    postgrest_admin_port: int | None = None
 
     # Rendered bodies held in this process. The key is immutable -- a
     # revision's content never changes -- so nothing here is ever invalidated,
@@ -123,6 +127,12 @@ class Config:
     @property
     def postgrest_url(self) -> str:
         return f"http://{self.postgrest_host}:{self.postgrest_port}"
+
+    @property
+    def postgrest_ready_url(self) -> str:
+        if self.postgrest_admin_port is None:
+            return self.postgrest_url
+        return f"http://{self.postgrest_host}:{self.postgrest_admin_port}/ready"
 
     @property
     def postgrest_db_uri(self) -> str:
@@ -149,6 +159,9 @@ class Config:
             postgrest_database_url=e.get("FSWIKI_POSTGREST_DATABASE_URL"),
             authenticator_password=e.get("FSWIKI_AUTHENTICATOR_PASSWORD") or None,
             postgrest_password=e.get("FSWIKI_POSTGREST_PASSWORD") or None,
+            postgrest_admin_port=(
+                int(e["FSWIKI_POSTGREST_ADMIN_PORT"])
+                if e.get("FSWIKI_POSTGREST_ADMIN_PORT") else None),
             render_cache_bytes=int(
                 e.get("FSWIKI_RENDER_CACHE_BYTES", cls.render_cache_bytes)),
             max_attachment_bytes=(

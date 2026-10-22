@@ -25,15 +25,24 @@ from __future__ import annotations
 
 import http.cookies
 import logging
+from typing import Final
 
+import anyio.to_thread
 from fswiki_core import pages as pages_mod
 from fswiki_core.client import ClientPool, PostgrestError, Unreachable
 from fswiki_core.pages import Pages
 from fswiki_core.render import cache as render_cache
 
 from .config import Config
+from .postgrest import Postgrest, answers
 
 log = logging.getLogger(__name__)
+
+# Paths a kubelet asks, answered before any wiki path is looked at. A page
+# named `healthz` at the root of the wiki is shadowed by the first.
+LIVE: Final = "/healthz"
+READY: Final = "/readyz"
+PROBES: Final = (LIVE, READY)
 
 # The cookie a session will land in once there is a login. Read already, and
 # ahead of the header, so that the shape is settled before OIDC arrives and a
@@ -113,9 +122,14 @@ def token_from(headers: list[tuple[bytes, bytes]]) -> str | None:
 class Application:
     """The wiki over HTTP. One instance per process."""
 
-    def __init__(self, config: Config, *, backend: str | None = None) -> None:
+    def __init__(self, config: Config, *, backend: str | None = None,
+                 postgrest: Postgrest | None = None) -> None:
         self._config = config
         self._backend = backend
+        # The child this process supervises, when it has one. Liveness asks it,
+        # so a PostgREST that died turns into a restart of the pod instead of
+        # a server that answers 502 to everyone for ever.
+        self._postgrest = postgrest
         self._pool = ClientPool()
         # One per process and shared by every request, which is the only way a
         # cache of rendered bodies is worth anything. Nothing in it is ever
@@ -151,10 +165,28 @@ class Application:
                              extra=[(b"allow", b"GET, HEAD")])
             return
 
+        probe = scope["path"]
+        if probe in PROBES:
+            status, body = await self._probe(probe)
+            await self._send(send, status, pages_mod.TEXT, body,
+                             body_bytes=method != "HEAD")
+            return
+
         status, kind, body = await self._respond(scope)
         await self._send(send, status, kind, body, body_bytes=method != "HEAD",
                          extra=[(k.encode(), v.encode())
                                 for k, v in pages_mod.attachment_headers(kind)])
+
+    async def _probe(self, path: str) -> tuple[int, bytes]:
+        """Answer a kubelet. Reads no token and records no view."""
+        if self._postgrest is not None and not self._postgrest.running:
+            return 503, b"postgrest has stopped\n"
+        if path == LIVE:
+            return 200, b"ok\n"
+        # answers() blocks on a socket, so it runs off the event loop.
+        if await anyio.to_thread.run_sync(answers, self._config.postgrest_ready_url):
+            return 200, b"ok\n"
+        return 503, b"postgrest is not ready\n"
 
     async def _respond(self, scope: dict) -> tuple[int, str, bytes]:
         pages, client = self.pages_for(token_from(scope.get("headers", [])))

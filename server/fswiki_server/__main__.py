@@ -74,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     # importing an HTTP server it will never reach.
     import uvicorn
 
-    app = Application(config, backend=args.backend)
+    app = Application(config, backend=args.backend, postgrest=postgrest)
     log.info("serving on http://%s:%s/", config.host, config.port)
     log.info("postgrest is on %s, and clients talk to it directly",
              config.postgrest_url)

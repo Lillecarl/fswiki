@@ -7,7 +7,7 @@ name = "fswiki-server"
 version = "0.1.0"
 description = "Read the wiki in a browser"
 requires-python = ">=3.11"
-dependencies = ["fswiki-core", "psycopg>=3.1", "uvicorn>=0.30"]
+dependencies = ["anyio>=4", "fswiki-core", "psycopg>=3.1", "uvicorn>=0.30"]
 
 [project.scripts]
 fswiki-serve = "fswiki_server.__main__:main"

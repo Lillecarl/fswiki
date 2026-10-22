@@ -315,3 +315,61 @@ async def test_the_real_program_starts_and_serves(stack, published, tmp_path):
         proc.terminate()
         proc.wait(timeout=20)
         log.close()
+
+
+# --- probes -----------------------------------------------------------------
+
+class _Child:
+    def __init__(self, running: bool) -> None:
+        self.running = running
+
+
+async def _get(app, path, method="GET"):
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport,
+                                 base_url="http://wiki.test") as c:
+        return await c.request(method, path)
+
+
+async def test_liveness_needs_no_wiki(config):
+    broken = Config(database_url=config.database_url, schema_dir=config.schema_dir,
+                    postgrest_host="127.0.0.1", postgrest_port=1)
+    app = Application(broken)
+    assert (await _get(app, "/healthz")).status_code == 200
+    await app.aclose()
+
+
+async def test_liveness_fails_when_the_child_has_stopped(config):
+    """Nothing else notices a PostgREST that died, and a server answering 502
+    to everyone is up as far as the kubelet can tell."""
+    for running, code in ((True, 200), (False, 503)):
+        app = Application(config, postgrest=_Child(running))
+        assert (await _get(app, "/healthz")).status_code == code
+        await app.aclose()
+
+
+async def test_readiness_follows_postgrest(config):
+    ready = Application(config)
+    assert (await _get(ready, "/readyz")).status_code == 200
+    await ready.aclose()
+
+    broken = Config(database_url=config.database_url, schema_dir=config.schema_dir,
+                    postgrest_host="127.0.0.1", postgrest_port=1)
+    app = Application(broken)
+    r = await _get(app, "/readyz")
+    assert r.status_code == 503
+    assert "not ready" in r.text
+    await app.aclose()
+
+
+async def test_a_probe_answers_head_and_takes_no_token(config):
+    app = Application(config)
+    r = await _get(app, "/readyz", "HEAD")
+    assert r.status_code == 200 and r.content == b""
+    await app.aclose()
+
+
+async def test_a_probe_is_still_read_only(config):
+    app = Application(config)
+    assert (await _get(app, "/healthz", "POST")).status_code == 405
+    await app.aclose()

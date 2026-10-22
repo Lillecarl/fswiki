@@ -219,3 +219,32 @@ def test_without_a_url_of_its_own_nothing_is_taken_away(monkeypatch):
     monkeypatch.setenv("PGPASSWORD", "owner-value")
     cfg = Config(database_url="postgres:///fswiki", schema_dir=SCHEMA)
     assert environment(cfg)["PGPASSWORD"] == "owner-value"
+
+
+def test_the_admin_server_is_off_unless_asked_for():
+    assert "PGRST_ADMIN_SERVER_PORT" not in environment(_with_url())
+    assert _with_url().postgrest_ready_url == "http://127.0.0.1:3000"
+
+
+def test_the_admin_server_binds_beside_postgrest():
+    cfg = _with_url(postgrest_admin_port=3001)
+    env = environment(cfg)
+    assert (env["PGRST_ADMIN_SERVER_HOST"], env["PGRST_ADMIN_SERVER_PORT"]) == (
+        "127.0.0.1", "3001")
+    assert cfg.postgrest_ready_url == "http://127.0.0.1:3001/ready"
+
+
+def test_the_admin_port_comes_from_the_environment():
+    env = {"FSWIKI_DATABASE_URL": "postgres://x", "FSWIKI_SCHEMA_DIR": str(SCHEMA)}
+    assert Config.from_env(env).postgrest_admin_port is None
+    assert Config.from_env(
+        {**env, "FSWIKI_POSTGREST_ADMIN_PORT": "3001"}).postgrest_admin_port == 3001
+
+
+def test_a_real_postgrest_reports_ready_on_its_admin_port(config):
+    from dataclasses import replace
+    cfg = replace(config, postgrest_admin_port=free_port())
+    with Postgrest(cfg):
+        wait_for(lambda: answers(cfg.postgrest_ready_url), timeout=10,
+                 what="the admin server's /ready")
+        assert answers(f"http://{cfg.postgrest_host}:{cfg.postgrest_admin_port}/live")
